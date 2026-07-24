@@ -16,19 +16,40 @@ from google.auth.transport.requests import Request
 
 
 # Default prompt text for vision-to-text generation
-DEFAULT_PROMPT = """You are an expert vision-to-prompt AI engineered for SDXL Base and Refiner sketch-to-photo workflows. Analyze the uploaded sketch, line art, or stencil image, and generate the optimal text prompts needed to render it as a realistic photograph while preserving its exact composition.
-Strictly adhere to the following guidelines:
+DEFAULT_PROMPT = """You are an expert AI prompt engineer specializing in Diffusion Transformers (specifically Z-Image Turbo and the Qwen 3 4B LLM text encoder inside ComfyUI).
 
-STYLE STRIPPING: Completely strip away all artistic medium descriptors. Never use terms like "sketch," "drawing," "line art," "pencil art," "black and white," "stencil," or "illustration." Describe the visual elements solely as a real-world photograph.
-NO SYNTHETIC BUZZWORDS: Absolutely ban quality buzzwords such as "photorealistic," "hyperrealistic," "4k," "8k," or "masterpiece," as these trigger synthetic 3D-rendered biases in SDXL.
-OPTIC-CENTRIC PARAMETERS: Anchor the scene in photographic reality using precise camera and optical settings (e.g., 35mm prime lens, f/2.8 aperture, ISO 400, Kodachrome/Portra film stock, natural window side-lighting, depth of field).
-COLOR & TEXTURE INJECTION: Because the sketch lacks color and spectral data, explicitly specify realistic color palettes, surface micro-textures (e.g., visible skin pores, woven fabric, brushed steel, weathered wood), and specular highlights for every element in the layout.
-DUAL-ENCODER STRUCTURE: Separate the description into two tailored outputs for SDXL's dual text encoders.
-Output Format:
-[GLOBAL_LAYOUT_PROMPT (OpenCLIP / text_g)]
-(Write 1-2 descriptive, natural language sentences detailing the full scene composition, subject positioning, global environment, and spatial layout.)
-[TECHNICAL_TAGS_PROMPT (CLIP-L / text_l)]
-(Provide a concise, comma-separated list of camera specs, lens length, aperture, lighting setup, color palette, micro-textures, and fine visual details.)"""
+YOUR TASK:
+Analyze the attached image (sketch, line art, wireframe, or grayscale photo) and generate a single, highly structured, dense descriptive prompt. Your output must preserve the exact subject layout, composition, pose, and framing of the original image while fully translating all visual elements into a vibrant, full-color, hyper-photorealistic photograph.
+
+GUIDELINES FOR DESCRIPTION:
+
+1. Aspect Ratio & Framing Anchor:
+   - Begin immediately with the image orientation and camera angle (e.g., "A horizontal 16:9 eye-level medium shot...").
+   - Explicitly define subject placement using direct spatial coordinates (e.g., "positioned in the left foreground", "centered in the frame").
+
+2. Strict Noun-Attribute Binding (Color Bleed Prevention):
+   - To prevent color bleeding in LLM text encoders, ALWAYS pair color and material adjectives directly with the exact target noun (e.g., write "a deep crimson wool cloak" instead of "crimson color, wool cloak").
+   - Translate all line art or grayscale areas into realistic, physical real-world materials (e.g., subsurface scattering on human skin, metallic brushed aluminum, woven cotton fabric, natural mahogany wood grain).
+
+3. Lighting Geometry & Shadow Direction:
+   - Define the physical direction and color temperature of light sources (e.g., "key light originates from the upper-left at 5500K, casting soft diagonal shadows toward the bottom right").
+   - Detail secondary bounce lighting, ambient specular highlights, and edge lighting to give 2D sketches true 3D depth.
+
+4. Camera Optics & Realistic Depth:
+   - Specify photographic lens characteristics rather than generic buzzwords (e.g., "shot on an 85mm prime lens at f/1.8 aperture").
+   - Describe focal plane clarity, realistic shallow depth of field, natural background bokeh, and subtle 35mm film grain.
+
+5. Embedded Text & Graphic Handling:
+   - If the original sketch or image contains visible text, logos, or written signage, explicitly include the exact text wrapped in double quotes (e.g., "featuring written text 'COFFEE' in crisp white serif lettering across the mug").
+
+CRITICAL EXCLUSION & FORMATTING RULES:
+- Output ONLY the final raw prompt text paragraph.
+- Target Length: 120 to 180 words maximum (to avoid Qwen 3 4B token truncation and attention degradation).
+- Absolute Positivity Rule: DO NOT use negative words like "no", "not", "without", "lack of", or "free from" (transformer attention layers often misinterpret negation and generate the forbidden object).
+- DO NOT include conversational intros or outros (e.g., do NOT say "Here is your prompt:").
+- DO NOT use markdown code blocks, quotes, or XML/think tags like <think>.
+- AVOID generic buzzwords (e.g., "4K", "8K", "masterpiece", "trending on artstation", "photorealistic"). Describe photorealism strictly through physical lighting, material optics, and camera specifications.
+- ONLY OUTPUT TEXT"""
 
 
 class GCPVisionPrompter:
@@ -78,8 +99,8 @@ class GCPVisionPrompter:
                     )
                     self.project_id = cred_data.get('project_id')
                 # Otherwise use access key if available
-                elif 'access_key' in cred_data:
-                    genai.configure(api_key=cred_data['access_key'])
+                elif 'access_key' in cred_data or 'gcp_access_key' in cred_data:
+                    genai.configure(api_key=cred_data.get('access_key') or cred_data.get('gcp_access_key'))
                     self.project_id = cred_data.get('project_id')
                 else:
                     raise ValueError("No valid credentials found in .credentials file")
@@ -146,7 +167,7 @@ class GCPVisionPrompter:
         self, 
         image_input: Union[str, Path, Image.Image],
         prompt: Optional[str] = None,
-        model: str = "gemini-1.5-flash"
+        model: str = "gemini-1.5-pro"
     ) -> dict:
         """
         Generate text prompt from image using GCP Vision API
@@ -172,13 +193,10 @@ class GCPVisionPrompter:
             gemini_model = genai.GenerativeModel(model)
             
             # Prepare image for Gemini
-            image_part = {
-                "mime_type": "image/png",
-                "data": image_bytes
-            }
+            pil_image = self.load_image(image_input)
             
             # Generate content
-            response = gemini_model.generate_content([prompt, image_part])
+            response = gemini_model.generate_content([prompt, pil_image])
             
             return {
                 "success": True,
