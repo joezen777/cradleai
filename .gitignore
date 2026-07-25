@@ -1,5 +1,6 @@
 # Credentials and secrets
 .credentials
+.credentials.json
 *.key
 *.pem
 *.json.backup
@@ -82,3 +83,7 @@ htmlcov/
 Thumbs.db
 .DS_Store
 
+
+# Node frontend
+node_modules/
+*.pid

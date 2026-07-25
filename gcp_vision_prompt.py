@@ -9,10 +9,9 @@ import json
 from pathlib import Path
 from typing import Union, Optional
 from PIL import Image
-import io
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from google.oauth2 import service_account
-from google.auth.transport.requests import Request
 
 
 # Default prompt text for vision-to-text generation
@@ -65,11 +64,15 @@ class GCPVisionPrompter:
         """
         self.project_id = None
         self.client = None
+        self.location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
         self._setup_credentials(credentials_path, access_key)
         
     def _setup_credentials(self, credentials_path: Optional[str], access_key: Optional[str]):
         """Setup GCP credentials from file, access key, or .credentials file"""
-        # Try credentials file first
+        workspace_root = Path(__file__).parent
+        credentials_path = credentials_path or str(workspace_root / ".credentials.json")
+
+        # Prefer a standard service-account JSON and use Vertex AI.
         if credentials_path and os.path.exists(credentials_path):
             with open(credentials_path, 'r') as f:
                 credentials_data = json.load(f)
@@ -78,14 +81,20 @@ class GCPVisionPrompter:
                 scopes=['https://www.googleapis.com/auth/cloud-platform']
             )
             self.project_id = credentials_data.get('project_id')
+            self.client = genai.Client(
+                vertexai=True,
+                credentials=credentials,
+                project=self.project_id,
+                location=self.location,
+                http_options=types.HttpOptions(api_version="v1", timeout=120_000),
+            )
             
         # Try access key
         elif access_key:
-            genai.configure(api_key=access_key)
+            self.client = genai.Client(api_key=access_key)
             
         # Try .credentials file in workspace
         else:
-            workspace_root = Path(__file__).parent
             credentials_file = workspace_root / '.credentials'
             
             if credentials_file.exists():
@@ -100,7 +109,9 @@ class GCPVisionPrompter:
                     self.project_id = cred_data.get('project_id')
                 # Otherwise use access key if available
                 elif 'access_key' in cred_data or 'gcp_access_key' in cred_data:
-                    genai.configure(api_key=cred_data.get('access_key') or cred_data.get('gcp_access_key'))
+                    self.client = genai.Client(
+                        api_key=cred_data.get('access_key') or cred_data.get('gcp_access_key')
+                    )
                     self.project_id = cred_data.get('project_id')
                 else:
                     raise ValueError("No valid credentials found in .credentials file")
@@ -148,26 +159,11 @@ class GCPVisionPrompter:
         else:
             raise TypeError("image_input must be a file path (str/Path) or PIL Image")
     
-    def image_to_bytes(self, image: Image.Image) -> bytes:
-        """
-        Convert PIL Image to bytes
-        
-        Args:
-            image: PIL Image object
-            
-        Returns:
-            Image data as bytes
-        """
-        img_byte_arr = io.BytesIO()
-        image.save(img_byte_arr, format='PNG')
-        img_byte_arr.seek(0)
-        return img_byte_arr.getvalue()
-    
     def generate_prompt(
         self, 
         image_input: Union[str, Path, Image.Image],
         prompt: Optional[str] = None,
-        model: str = "gemini-1.5-pro"
+        model: str = "gemini-2.5-flash"
     ) -> dict:
         """
         Generate text prompt from image using GCP Vision API
@@ -186,17 +182,11 @@ class GCPVisionPrompter:
         
         # Load and prepare image
         pil_image = self.load_image(image_input)
-        image_bytes = self.image_to_bytes(pil_image)
-        
         try:
-            # Initialize Gemini model
-            gemini_model = genai.GenerativeModel(model)
-            
-            # Prepare image for Gemini
-            pil_image = self.load_image(image_input)
-            
-            # Generate content
-            response = gemini_model.generate_content([prompt, pil_image])
+            response = self.client.models.generate_content(
+                model=model,
+                contents=[prompt, pil_image],
+            )
             
             return {
                 "success": True,
@@ -207,9 +197,13 @@ class GCPVisionPrompter:
             }
             
         except Exception as e:
+            status_code = getattr(e, "code", None)
             return {
                 "success": False,
                 "error": str(e),
+                "error_type": type(e).__name__,
+                "status_code": status_code,
+                "retryable": status_code in {408, 429, 500, 502, 503, 504},
                 "model": model,
                 "prompt_used": prompt
             }
@@ -222,7 +216,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate text prompts from images using GCP Vision API")
     parser.add_argument("image", help="Path to input image file")
     parser.add_argument("--prompt", help="Custom prompt text (uses default if not provided)")
-    parser.add_argument("--model", default="gemini-1.5-flash", help="Gemini model to use")
+    parser.add_argument("--model", default="gemini-2.5-flash", help="Gemini model to use")
     parser.add_argument("--output", help="Output file to save response")
     
     args = parser.parse_args()

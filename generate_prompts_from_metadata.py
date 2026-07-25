@@ -5,6 +5,7 @@ Creates multiple entries per frame with different gen_sequence values
 """
 
 import json
+import os
 import time
 import random
 from pathlib import Path
@@ -87,12 +88,18 @@ class PromptGenerationPhase1:
         
         return unique_frames
     
-    def _call_gcp_with_backoff(self, frame_path: str, max_retries: int = 5) -> Dict:
+    def _call_gcp_with_backoff(
+        self,
+        frame_path: str,
+        scene_index: int,
+        max_retries: int = 5
+    ) -> Dict:
         """
         Call GCP Vision API with exponential backoff retry
         
         Args:
             frame_path: Path to frame image
+            scene_index: Scene whose prompt text is being requested
             max_retries: Maximum number of retry attempts
             
         Returns:
@@ -102,14 +109,24 @@ class PromptGenerationPhase1:
         max_delay = 60.0  # Maximum delay in seconds
         
         for attempt in range(max_retries):
+            print(f"  Attempt {attempt + 1}/{max_retries} for {frame_path}")
+            if os.environ.get("ALLOW_GEMINI") != "YES":
+                raise RuntimeError(
+                    f"Prompt text is not filled out for scene index {scene_index}; "
+                    "set ALLOW_GEMINI=YES in order to fetch a prompt text "
+                    "for local processing."
+                )
+
             try:
-                print(f"  Attempt {attempt + 1}/{max_retries} for {frame_path}")
                 result = self.gcp_prompter.generate_prompt(frame_path)
                 
                 if result["success"]:
                     return result
                 else:
                     error = result.get('error', 'Unknown error')
+                    if not result.get("retryable", False):
+                        print(f"  Permanent API error: {error}")
+                        return result
                     # Check if error is rate limiting
                     if '429' in str(error) or 'rate limit' in error.lower():
                         print(f"  Rate limited: {error}")
@@ -129,7 +146,7 @@ class PromptGenerationPhase1:
                 print(f"  Retrying in {delay:.1f} seconds...")
                 time.sleep(delay)
         
-        return {"success": False, "error": "Max retries exceeded"}
+        return {"success": False, "error": "Retryable API failure persisted after maximum attempts"}
     
     def _write_metadata_entries(self, entries: List[Dict]):
         """Write metadata entries to file"""
@@ -217,7 +234,10 @@ class PromptGenerationPhase1:
             
             try:
                 # Call GCP Vision API with backoff
-                gcp_result = self._call_gcp_with_backoff(str(frame_path))
+                gcp_result = self._call_gcp_with_backoff(
+                    str(frame_path),
+                    scene_index=scene.get("scene_index")
+                )
                 
                 if gcp_result["success"]:
                     prompt_text = gcp_result["response_text"]

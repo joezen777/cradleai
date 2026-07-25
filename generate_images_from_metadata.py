@@ -253,7 +253,8 @@ class ImageGenerationPhase2:
                 frame_file = entry.get('frame_file')
                 
                 # Resolve frame path for similarity scoring
-                frame_path = os.path.join("output", frame_file) if frame_file else None
+                normalized_frame_file = frame_file.replace("\\", "/") if frame_file else None
+                frame_path = os.path.join("output", normalized_frame_file) if normalized_frame_file else None
                 if not frame_path or not os.path.exists(frame_path):
                     frame_path = None
                 

@@ -42,15 +42,51 @@ class NeuralEdgeExtractor:
         self._setup_model()
     
     def _setup_model(self):
-        """Setup PiDiNet or HED edge detection model"""
+        """Load the installed PyTorch PiDiNet model, with Canny as fallback."""
         try:
-            # Try to use OpenCV's PiDiNet implementation
-            self.model = cv2.ximgproc.createStructuredEdgeDetection("")
+            from types import SimpleNamespace
+            import models as pidinet_models
+
+            repo_root = Path(pidinet_models.__file__).resolve().parent.parent
+            weights_path = Path(os.environ.get(
+                "PIDINET_WEIGHTS",
+                repo_root / "trained_models" / "table5_pidinet.pth",
+            ))
+            if not weights_path.is_file():
+                raise FileNotFoundError(f"PiDiNet weights not found: {weights_path}")
+
+            args = SimpleNamespace(config="carv4", sa=True, dil=True)
+            model = pidinet_models.pidinet(args)
+            checkpoint = torch.load(weights_path, map_location="cpu", weights_only=False)
+            state_dict = checkpoint.get("state_dict", checkpoint)
+            state_dict = {
+                key.removeprefix("module."): value
+                for key, value in state_dict.items()
+            }
+            model.load_state_dict(state_dict)
+            model.to(self.device).eval()
+
+            self.model = model
             self.use_pidinet = True
-        except:
-            # Fall back to Canny edge detection if PiDiNet not available
+            self.pidinet_weights = str(weights_path)
+            print(f"PiDiNet enabled: {weights_path.name} on {self.device}")
+        except Exception as exc:
+            self.model = None
             self.use_pidinet = False
-            print("PiDiNet not available, falling back to Canny edge detection")
+            print(f"PiDiNet unavailable ({type(exc).__name__}: {exc}); falling back to Canny")
+
+    def _extract_pidinet_edges(self, image: np.ndarray) -> np.ndarray:
+        """Run PiDiNet inference for an RGB uint8 image."""
+        tensor = torch.from_numpy(np.ascontiguousarray(image)).permute(2, 0, 1)
+        tensor = tensor.float().div(255.0)
+        mean = tensor.new_tensor([0.485, 0.456, 0.406])[:, None, None]
+        std = tensor.new_tensor([0.229, 0.224, 0.225])[:, None, None]
+        tensor = tensor.sub(mean).div(std).unsqueeze(0).to(self.device)
+
+        with torch.inference_mode():
+            edge_probability = self.model(tensor)[-1]
+        edges = edge_probability.squeeze(0).squeeze(0).float().cpu().numpy()
+        return np.clip(edges * 255.0, 0, 255).astype(np.uint8)
     
     def extract_edges(self, image: np.ndarray) -> np.ndarray:
         """
@@ -67,10 +103,8 @@ class NeuralEdgeExtractor:
         else:
             gray = image
         
-        if self.use_pidinet and hasattr(self.model, 'detectEdges'):
-            # Use PiDiNet for neural edge extraction
-            edges = self.model.detectEdges(cv2.cvtColor(image, cv2.COLOR_RGB2BGR) / 255.0)
-            edges = (edges * 255).astype(np.uint8)
+        if self.use_pidinet:
+            edges = self._extract_pidinet_edges(image)
         else:
             # Fall back to Canny edge detection
             edges = cv2.Canny(gray, 50, 150)
