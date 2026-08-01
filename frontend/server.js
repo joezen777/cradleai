@@ -1,5 +1,6 @@
 import express from "express";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,14 +8,12 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(here, "..");
 const outputRoot = path.join(projectRoot, "output");
 const metadataPath = path.join(outputRoot, "metadata.jsonl");
-const requestedGenerationPath = process.env.METADATAGEN_PATH
-  ? path.resolve(projectRoot, process.env.METADATAGEN_PATH)
-  : null;
-const generationPath = requestedGenerationPath
-  || (fs.existsSync(path.join(outputRoot, "metadatagen_full.jsonl"))
-    ? path.join(outputRoot, "metadatagen_full.jsonl")
-    : path.join(outputRoot, "metadatagen.jsonl"));
+const generationPath = path.join(outputRoot, "metadatagen.jsonl");
+const pegasusMetadataPath = path.join(outputRoot, "pegasus_metadata.jsonl");
+const chapterMetadataPath = path.join(outputRoot, "pegasus_chapter_metadata.jsonl");
+const chapterCastPath = path.join(outputRoot, "gemini_chapter_cast.jsonl");
 const port = Number(process.env.PORT || 4173);
+const host = process.env.HOST || "0.0.0.0";
 const pollMs = 30_000;
 
 const app = express();
@@ -45,6 +44,12 @@ function buildState() {
   const metadataRows = parseJsonl(metadataPath);
   const scenes = metadataRows.filter((row) => Number.isFinite(row.scene_index));
   const generations = parseJsonl(generationPath);
+  const clipDescriptions = new Map(
+    parseJsonl(pegasusMetadataPath).map((row) => [
+      Number(row.scene_index),
+      row.description || null
+    ])
+  );
   const generationGroups = new Map();
 
   for (const row of generations) {
@@ -65,6 +70,9 @@ function buildState() {
       if (!rawFrame) continue;
       const frameFile = normalizeRelative(rawFrame);
       const rows = generationGroups.get(frameFile) || [];
+      const promptText = rows.find((row) =>
+        String(row.prompt_text || "").trim()
+      )?.prompt_text || null;
       const completed = rows.filter((row) =>
         row.gen_filename && Number.isFinite(Number(row.similarity_score))
       );
@@ -93,11 +101,13 @@ function buildState() {
         frameType,
         label: "Scene " + String(scene.scene_index).padStart(3, "0") + " / " + frameType,
         clipUrl: mediaUrl(scene.clip_file),
+        clipDescription: clipDescriptions.get(Number(scene.scene_index)) || null,
         originalUrl: mediaUrl(frameFile),
         displayUrl: mediaUrl(best?.gen_filename) || mediaUrl(frameFile),
         bestSimilarity: best ? Number(best.similarity_score) : null,
         bestSequence: best ? Number(best.gen_sequence) : null,
         completedCount: completed.length,
+        promptText,
         generations: slots
       });
     }
@@ -109,13 +119,80 @@ function buildState() {
 
   const completedFrames = frames.filter((frame) => frame.completedCount > 0).length;
   const completedImages = frames.reduce((sum, frame) => sum + frame.completedCount, 0);
+  const chapterRows = parseJsonl(chapterMetadataPath);
+  const castRows = new Map(
+    parseJsonl(chapterCastPath).map((row) => [Number(row.chapter_number), row])
+  );
+  const chapters = chapterRows
+    .filter((row) => Number.isFinite(Number(row.chapter_index)))
+    .map((chapter) => {
+      const chapterNumber = Number(chapter.chapter_index);
+      const names = new Map(
+        (chapter.speaker_name_guesses || []).map((guess) => [
+          String(guess.speaker_id),
+          String(guess.character_name_guess || guess.speaker_id)
+        ])
+      );
+      const transcript = (chapter.transcript_turns || [])
+        .filter((turn) => String(turn.text || "").trim())
+        .map((turn) => ({
+          speaker: turn.speaker_id === "audio_event"
+            ? "Sound"
+            : names.get(String(turn.speaker_id)) || String(turn.speaker_id || "Unknown"),
+          text: String(turn.text).replace(/\s+/g, " ").trim()
+        }));
+      const castRecord = castRows.get(chapterNumber);
+      return {
+        id: "chapter-" + chapterNumber,
+        chapterNumber,
+        sceneIndex: chapterNumber,
+        frameType: "chapter",
+        label: "Chapter " + String(chapterNumber).padStart(2, "0"),
+        clipUrl: mediaUrl(chapter.aggregate_clip_file),
+        thumbnailUrl: mediaUrl(chapter.thumbnail),
+        displayUrl: mediaUrl(chapter.thumbnail),
+        movieStartTimecode: chapter.movie_start_timecode,
+        movieEndTimecode: chapter.movie_end_timecode,
+        durationSeconds: chapter.duration_seconds,
+        chapterSummary: chapter.chapter_summary || "",
+        transcript,
+        cast: (castRecord?.cast || []).map((member, index) => ({
+          id: chapterNumber + "-cast-" + index,
+          characterName: member.character_name,
+          characterDescription: member.character_description,
+          characterDetails: member.character_details,
+          characterGenprompt: member.character_genprompt,
+          imageGenerations: (member.image_generations || []).map((generation) => ({
+            genaimodel: generation.genaimodel,
+            celebrityName: generation.celebrity_name || null,
+            imageUrl: mediaUrl(generation.gen_character_image)
+          }))
+        }))
+      };
+    })
+    .sort((a, b) => a.chapterNumber - b.chapterNumber);
+
   return {
     frames,
+    chapters,
     stats: {
       totalFrames: frames.length,
       completedFrames,
       completedImages,
       pendingFrames: frames.length - completedFrames,
+      totalChapters: chapters.length,
+      chaptersWithCast: chapters.filter((chapter) => chapter.cast.length).length,
+      castImages: chapters.reduce(
+        (total, chapter) =>
+          total + chapter.cast.reduce(
+            (chapterTotal, member) =>
+              chapterTotal + member.imageGenerations.filter(
+                (generation) => generation.imageUrl
+              ).length,
+            0
+          ),
+        0
+      ),
       source: path.relative(projectRoot, generationPath),
       updatedAt: new Date().toISOString()
     }
@@ -123,7 +200,13 @@ function buildState() {
 }
 
 function getSignature() {
-  return [metadataPath, generationPath].map((filePath) => {
+  return [
+    metadataPath,
+    generationPath,
+    pegasusMetadataPath,
+    chapterMetadataPath,
+    chapterCastPath
+  ].map((filePath) => {
     try {
       const stat = fs.statSync(filePath);
       return filePath + ":" + stat.size + ":" + stat.mtimeMs;
@@ -181,7 +264,20 @@ app.use((_request, response) => {
   response.sendFile(path.join(here, "dist", "index.html"));
 });
 
-app.listen(port, "0.0.0.0", () => {
-  console.log("Cradle Film Monitor: http://127.0.0.1:" + port);
+app.listen(port, host, () => {
+  console.log("Cradle Film Monitor:");
+  console.log("  Local:   http://127.0.0.1:" + port);
+  const addresses = Object.values(os.networkInterfaces())
+    .flat()
+    .filter((address) =>
+      address
+      && address.family === "IPv4"
+      && !address.internal
+    )
+    .map((address) => address.address);
+  for (const address of [...new Set(addresses)]) {
+    console.log("  Network: http://" + address + ":" + port);
+  }
+  if (host !== "0.0.0.0") console.log("  Bound to HOST=" + host);
   console.log("Watching: " + path.relative(projectRoot, generationPath) + " every 30 seconds");
 });

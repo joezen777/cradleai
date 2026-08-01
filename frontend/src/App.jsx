@@ -3,6 +3,8 @@ import {
   Box,
   Chip,
   CircularProgress,
+  Dialog,
+  IconButton,
   LinearProgress,
   Paper,
   Stack,
@@ -11,6 +13,9 @@ import {
 import MovieFilterIcon from "@mui/icons-material/MovieFilter";
 import FiberManualRecordIcon from "@mui/icons-material/FiberManualRecord";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
+import CloseIcon from "@mui/icons-material/Close";
+import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
+import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 
 const easeOutQuint = (value) => 1 - Math.pow(1 - value, 5);
 
@@ -26,7 +31,9 @@ function FilmFrame({ frame, selected, register }) {
       <div className="frame-caption">
         <span>{frame.frameType.toUpperCase()}</span>
         <span>
-          {frame.bestSimilarity == null
+          {frame.frameType === "chapter"
+            ? frame.movieStartTimecode
+            : frame.bestSimilarity == null
             ? "ORIGINAL"
             : frame.bestSimilarity.toFixed(2) + "%"}
         </span>
@@ -56,9 +63,25 @@ function Theater({ frame }) {
   );
 }
 
-function GalleryTile({ title, url, similarity, original, best }) {
+function GalleryTile({ title, url, similarity, original, best, onExpand }) {
   return (
-    <Paper className={"gallery-tile" + (best ? " best" : "")} elevation={0}>
+    <Paper
+      className={
+        "gallery-tile" +
+        (best ? " best" : "") +
+        (onExpand && url ? " expandable" : "")
+      }
+      elevation={0}
+      onClick={onExpand && url ? onExpand : undefined}
+      role={onExpand && url ? "button" : undefined}
+      tabIndex={onExpand && url ? 0 : undefined}
+      onKeyDown={(event) => {
+        if (onExpand && url && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          onExpand();
+        }
+      }}
+    >
       <div className="tile-image">
         {url ? <img src={url} alt={title} loading="lazy" /> : <div className="pending-tile">DEVELOPING</div>}
         {best && <span className="best-badge"><AutoAwesomeIcon fontSize="inherit" /> BEST</span>}
@@ -73,10 +96,40 @@ function GalleryTile({ title, url, similarity, original, best }) {
   );
 }
 
+function CharacterDetails({ details }) {
+  if (!details) return <Typography color="text.secondary">No details available.</Typography>;
+  return (
+    <div className="detail-sections">
+      {Object.entries(details).map(([section, value]) => (
+        <section key={section}>
+          <Typography variant="overline">{section.replaceAll("_", " ")}</Typography>
+          {value && typeof value === "object" ? (
+            <dl>
+              {Object.entries(value).map(([key, content]) => (
+                <div key={key}>
+                  <dt>{key.replaceAll("_", " ")}</dt>
+                  <dd>{String(content)}</dd>
+                </div>
+              ))}
+            </dl>
+          ) : (
+            <Typography variant="body2">{String(value ?? "")}</Typography>
+          )}
+        </section>
+      ))}
+    </div>
+  );
+}
+
 export default function App() {
   const [data, setData] = useState(null);
+  const [mode, setMode] = useState("clips");
   const [selectedId, setSelectedId] = useState(null);
+  const [selectedCastId, setSelectedCastId] = useState(null);
+  const [castGenerationIndexes, setCastGenerationIndexes] = useState({});
+  const [clipDescriptionOpen, setClipDescriptionOpen] = useState(false);
   const [error, setError] = useState("");
+  const [expandedImage, setExpandedImage] = useState(null);
   const railRef = useRef(null);
   const nodesRef = useRef(new Map());
   const snapTimerRef = useRef(null);
@@ -109,10 +162,28 @@ export default function App() {
   }, [loadState]);
 
   const selectedIndex = useMemo(
-    () => data?.frames.findIndex((frame) => frame.id === selectedId) ?? -1,
-    [data, selectedId]
+    () => {
+      const items = mode === "clips" ? data?.frames : data?.chapters;
+      return items?.findIndex((item) => item.id === selectedId) ?? -1;
+    },
+    [data, mode, selectedId]
   );
-  const selected = selectedIndex >= 0 ? data.frames[selectedIndex] : null;
+  const reelItems = mode === "clips" ? data?.frames || [] : data?.chapters || [];
+  const selected = selectedIndex >= 0 ? reelItems[selectedIndex] : null;
+  const selectedCast = selected?.cast?.find((member) => member.id === selectedCastId)
+    || selected?.cast?.[0]
+    || null;
+
+  useEffect(() => {
+    const items = mode === "clips" ? data?.frames : data?.chapters;
+    if (items?.length && !items.some((item) => item.id === selectedId)) {
+      setSelectedId(items[0].id);
+    }
+  }, [data, mode, selectedId]);
+
+  useEffect(() => {
+    setSelectedCastId(selected?.cast?.[0]?.id || null);
+  }, [selected?.id]);
 
   const register = useCallback((id, node) => {
     if (node) nodesRef.current.set(id, node);
@@ -121,11 +192,11 @@ export default function App() {
 
   const nearestFrame = useCallback(() => {
     const rail = railRef.current;
-    if (!rail || !data?.frames.length) return null;
+    if (!rail || !reelItems.length) return null;
     const center = rail.getBoundingClientRect().top + rail.clientHeight / 2;
     let nearest = null;
     let distance = Infinity;
-    for (const frame of data.frames) {
+    for (const frame of reelItems) {
       const node = nodesRef.current.get(frame.id);
       if (!node) continue;
       const rect = node.getBoundingClientRect();
@@ -136,7 +207,7 @@ export default function App() {
       }
     }
     return nearest;
-  }, [data]);
+  }, [reelItems]);
 
   const stopMotion = useCallback(() => {
     cancelAnimationFrame(animationRef.current);
@@ -261,7 +332,7 @@ export default function App() {
       const previous = clickRef.current;
       if (previous.frameId === drag.frameId && now - previous.time <= 450) {
         clickRef.current = { frameId: null, time: 0 };
-        const frame = data?.frames.find((item) => item.id === drag.frameId);
+        const frame = reelItems.find((item) => item.id === drag.frameId);
         if (frame) {
           animateToFrame(frame);
           return;
@@ -273,7 +344,7 @@ export default function App() {
 
     if (Math.abs(velocityRef.current) > 0.035) startMomentum();
     else scheduleSnap();
-  }, [animateToFrame, data, scheduleSnap, startMomentum]);
+  }, [animateToFrame, reelItems, scheduleSnap, startMomentum]);
 
   useEffect(() => {
     const rail = railRef.current;
@@ -293,17 +364,17 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event) => {
-      if (!data?.frames.length || !["ArrowDown", "ArrowUp", "PageDown", "PageUp"].includes(event.key)) return;
+      if (!reelItems.length || !["ArrowDown", "ArrowUp", "PageDown", "PageUp"].includes(event.key)) return;
       event.preventDefault();
       lastInputRef.current = performance.now();
       const direction = event.key.includes("Down") ? 1 : -1;
       const jump = event.key.startsWith("Page") ? 3 : 1;
-      const nextIndex = Math.max(0, Math.min(data.frames.length - 1, selectedIndex + direction * jump));
-      animateToFrame(data.frames[nextIndex]);
+      const nextIndex = Math.max(0, Math.min(reelItems.length - 1, selectedIndex + direction * jump));
+      animateToFrame(reelItems[nextIndex]);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [animateToFrame, data, selectedIndex]);
+  }, [animateToFrame, reelItems, selectedIndex]);
 
   useEffect(() => () => {
     clearTimeout(snapTimerRef.current);
@@ -328,15 +399,38 @@ export default function App() {
             <Typography variant="h1">The Colorization Reel</Typography>
           </div>
         </Stack>
+        <nav className="view-tabs" aria-label="Content view">
+          <button
+            type="button"
+            className={mode === "clips" ? "active" : ""}
+            onClick={() => setMode("clips")}
+          >
+            Clips
+          </button>
+          <button
+            type="button"
+            className={mode === "chapters" ? "active" : ""}
+            onClick={() => setMode("chapters")}
+          >
+            Chapters
+          </button>
+        </nav>
         <Stack className="status-block" spacing={0.7}>
           <Stack direction="row" spacing={1} alignItems="center" justifyContent="flex-end">
             <FiberManualRecordIcon className="live-dot" />
             <Typography variant="caption">LIVE / 30 SEC</Typography>
-            <Chip size="small" label={data.stats.completedImages + " renders"} />
+            <Chip
+              size="small"
+              label={mode === "clips"
+                ? data.stats.completedImages + " renders"
+                : data.stats.totalChapters + " chapters"}
+            />
           </Stack>
           <LinearProgress variant="determinate" value={progress} />
           <Typography variant="caption" color="text.secondary">
-            {data.stats.completedFrames} of {data.stats.totalFrames} frames developed
+            {mode === "clips"
+              ? `${data.stats.completedFrames} of ${data.stats.totalFrames} frames developed`
+              : `${data.stats.chaptersWithCast} chapters with cast metadata`}
           </Typography>
         </Stack>
       </header>
@@ -346,7 +440,7 @@ export default function App() {
       <section className="workspace">
         <div className="reel-column">
           <div className="focus-marker">
-            <span>CURRENT FRAME</span>
+            <span>{mode === "clips" ? "CURRENT FRAME" : "CURRENT CHAPTER"}</span>
             <b>{selected?.label || "---"}</b>
           </div>
           <div
@@ -360,7 +454,7 @@ export default function App() {
           >
             <div className="film-stock">
               <div className="leader leader-top">CRADLE / 35 MM / 2026</div>
-              {data.frames.map((frame) => (
+              {reelItems.map((frame) => (
                 <FilmFrame
                   key={frame.id}
                   frame={frame}
@@ -379,36 +473,257 @@ export default function App() {
               <Typography variant="overline">NOW PROJECTING</Typography>
               <Typography variant="h2">{selected?.label}</Typography>
             </div>
-            <div className="score-readout">
-              <span>BEST MATCH</span>
-              <strong>{selected?.bestSimilarity == null ? "--" : selected.bestSimilarity.toFixed(2) + "%"}</strong>
-            </div>
-          </div>
-
-          <Theater frame={selected} />
-
-          <div className="gallery-heading">
-            <Typography variant="h2">Frame Variations</Typography>
-            <Typography variant="body2" color="text.secondary">
-              Original negative plus ten developed candidates, ordered by generation.
-            </Typography>
-          </div>
-          <div className="gallery-grid">
-            {selected && (
-              <GalleryTile title="FRAME 0" url={selected.originalUrl} original />
+            {mode === "clips" ? (
+              <div className="score-readout">
+                <span>BEST MATCH</span>
+                <strong>{selected?.bestSimilarity == null ? "--" : selected.bestSimilarity.toFixed(2) + "%"}</strong>
+              </div>
+            ) : (
+              <div className="score-readout">
+                <span>MOVIE RANGE</span>
+                <strong className="chapter-range">{selected?.movieStartTimecode}</strong>
+              </div>
             )}
-            {selected?.generations.map((generation) => (
-              <GalleryTile
-                key={generation.sequence}
-                title={"GEN " + generation.sequence}
-                url={generation.url}
-                similarity={generation.similarity}
-                best={generation.sequence === selected.bestSequence}
-              />
-            ))}
           </div>
+
+          {mode === "clips" ? (
+            <div className={
+              "clip-presentation" + (clipDescriptionOpen ? " is-description-open" : "")
+            }>
+              <Theater frame={selected} />
+              <Paper className="clip-description-card" elevation={0}>
+                <button
+                  type="button"
+                  className="clip-description-toggle"
+                  aria-expanded={clipDescriptionOpen}
+                  aria-label={
+                    clipDescriptionOpen
+                      ? "Collapse clip description"
+                      : "Expand clip description"
+                  }
+                  onClick={() => setClipDescriptionOpen((current) => !current)}
+                >
+                  {clipDescriptionOpen ? <ChevronRightIcon /> : <ChevronLeftIcon />}
+                  <span>DESCRIPTION</span>
+                </button>
+                <div className="clip-description-content" aria-hidden={!clipDescriptionOpen}>
+                  <Typography variant="overline">Clip Description</Typography>
+                  <Typography variant="body2">
+                    {selected?.clipDescription || "No clip description available."}
+                  </Typography>
+                </div>
+              </Paper>
+            </div>
+          ) : (
+            <Theater frame={selected} />
+          )}
+
+          {mode === "clips" ? (
+            <>
+              <div className="gallery-heading">
+                <Typography variant="h2">Frame Variations</Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Original negative plus ten developed candidates, ordered by generation.
+                </Typography>
+              </div>
+              <div className="gallery-grid">
+                {selected && (
+                  <GalleryTile title="FRAME 0" url={selected.originalUrl} original />
+                )}
+                {selected?.generations.map((generation) => (
+                  <GalleryTile
+                    key={generation.sequence}
+                    title={"GEN " + generation.sequence}
+                    url={generation.url}
+                    similarity={generation.similarity}
+                    best={generation.sequence === selected.bestSequence}
+                    onExpand={generation.url ? () => setExpandedImage({
+                      url: generation.url,
+                      title: "Generation " + generation.sequence,
+                      similarity: generation.similarity
+                    }) : undefined}
+                  />
+                ))}
+              </div>
+              <Paper className="info-card prompt-card frame-prompt-card" elevation={0}>
+                <Typography variant="overline">Prompt Text</Typography>
+                <Typography className="prompt-text" variant="body2">
+                  {selected?.promptText || "No prompt text available."}
+                </Typography>
+              </Paper>
+            </>
+          ) : (
+            <>
+              <div className="chapter-copy-grid">
+                <Paper className="info-card" elevation={0}>
+                  <Typography variant="overline">Chapter Summary</Typography>
+                  <Typography className="chapter-summary" variant="body2">
+                    {selected?.chapterSummary || "No summary available."}
+                  </Typography>
+                </Paper>
+                <Paper className="info-card" elevation={0}>
+                  <Typography variant="overline">Chapter Transcript</Typography>
+                  <div className="chapter-transcript">
+                    {selected?.transcript?.map((turn, index) => (
+                      <p key={index}>
+                        <strong>{turn.speaker}</strong>
+                        <span>{turn.text}</span>
+                      </p>
+                    ))}
+                  </div>
+                </Paper>
+              </div>
+
+              <div className="gallery-heading cast-heading">
+                <Typography variant="h2">Chapter Cast</Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Select a cast reference to inspect its grounded character design.
+                </Typography>
+              </div>
+              <div className="cast-carousel">
+                {selected?.cast?.map((member) => {
+                  const generations = member.imageGenerations || [];
+                  const generationIndex = Math.min(
+                    castGenerationIndexes[member.id] || 0,
+                    Math.max(0, generations.length - 1)
+                  );
+                  const generation = generations[generationIndex];
+                  return (
+                    <div
+                      key={member.id}
+                      className={"cast-slide" + (member.id === selectedCast?.id ? " active" : "")}
+                    >
+                      <div className="cast-image-stage">
+                        <button
+                          type="button"
+                          className="cast-image-button"
+                          onClick={() => setSelectedCastId(member.id)}
+                          onDoubleClick={() => {
+                            if (generation?.imageUrl) {
+                              setExpandedImage({
+                                url: generation.imageUrl,
+                                title: member.characterName,
+                                caption: generation.genaimodel,
+                                fullWindow: true
+                              });
+                            }
+                          }}
+                        >
+                          {generation?.imageUrl ? (
+                            <img
+                              src={generation.imageUrl}
+                              alt={member.characterName}
+                              loading="lazy"
+                            />
+                          ) : (
+                            <div className="cast-placeholder">
+                              <span>{member.characterName?.slice(0, 1) || "?"}</span>
+                              IMAGE PENDING
+                            </div>
+                          )}
+                        </button>
+                        {generation?.genaimodel && (
+                          <span className="cast-model-watermark">
+                            {generation.genaimodel}
+                          </span>
+                        )}
+                        {generations.length > 0 && (
+                          <nav
+                            className="cast-generation-dots"
+                            aria-label={`${member.characterName} image variants`}
+                          >
+                            {generations.map((candidate, index) => (
+                              <button
+                                type="button"
+                                key={`${candidate.genaimodel}-${index}`}
+                                className={index === generationIndex ? "active" : ""}
+                                aria-label={`Show ${candidate.genaimodel} image`}
+                                aria-pressed={index === generationIndex}
+                                onClick={() => {
+                                  setSelectedCastId(member.id);
+                                  setCastGenerationIndexes((current) => ({
+                                    ...current,
+                                    [member.id]: index
+                                  }));
+                                }}
+                              />
+                            ))}
+                          </nav>
+                        )}
+                      </div>
+                      <b>{member.characterName}</b>
+                      {generation?.celebrityName && (
+                        <span className="cast-celebrity-name">
+                          {generation.celebrityName}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="character-card-grid">
+                <div className="character-card-column">
+                  <Paper className="info-card character-card" elevation={0}>
+                    <Typography variant="overline">Character Description</Typography>
+                    <Typography variant="h3">{selectedCast?.characterName || "No cast selected"}</Typography>
+                    <Typography className="character-description" variant="body2">
+                      {selectedCast?.characterDescription || "No character description available."}
+                    </Typography>
+                  </Paper>
+                  <Paper className="info-card character-card prompt-card" elevation={0}>
+                    <Typography variant="overline">Generated Prompt Text</Typography>
+                    <Typography className="prompt-text" variant="body2">
+                      {selectedCast?.characterGenprompt || "No generated prompt text available."}
+                    </Typography>
+                  </Paper>
+                </div>
+                <Paper className="info-card character-card" elevation={0}>
+                  <Typography variant="overline">Character Details</Typography>
+                  <CharacterDetails details={selectedCast?.characterDetails} />
+                </Paper>
+              </div>
+            </>
+          )}
         </aside>
       </section>
+
+      <Dialog
+        open={Boolean(expandedImage)}
+        onClose={() => setExpandedImage(null)}
+        maxWidth={false}
+        PaperProps={{
+          className:
+            "image-lightbox" + (expandedImage?.fullWindow ? " full-window" : "")
+        }}
+      >
+        <IconButton
+          className="lightbox-close"
+          onClick={() => setExpandedImage(null)}
+          aria-label="Close expanded image"
+        >
+          <CloseIcon />
+        </IconButton>
+        {expandedImage && (
+          <>
+            <img
+              src={expandedImage.url}
+              alt={expandedImage.title}
+              onClick={() => setExpandedImage(null)}
+            />
+            <div className="lightbox-caption">
+              <Typography>{expandedImage.title}</Typography>
+              <Typography color="primary">
+                {expandedImage.caption
+                  ? expandedImage.caption
+                  : expandedImage.similarity == null
+                  ? "Score pending"
+                  : expandedImage.similarity.toFixed(2) + "% similarity"}
+              </Typography>
+            </div>
+          </>
+        )}
+      </Dialog>
     </main>
   );
 }

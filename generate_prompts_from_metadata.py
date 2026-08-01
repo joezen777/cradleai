@@ -8,10 +8,18 @@ import json
 import os
 import time
 import random
+import re
+import tempfile
+import copy
 from pathlib import Path
 from typing import Dict, List, Set
 from datetime import datetime
-from gcp_vision_prompt import GCPVisionPrompter
+from gcp_vision_prompt import DEFAULT_PROMPT, GCPVisionPrompter
+from retrieve_clip_lore_context import (
+    load_clip_transcript,
+    load_related_chapter,
+    prepare_chapter_summary,
+)
 
 
 class PromptGenerationPhase1:
@@ -22,7 +30,11 @@ class PromptGenerationPhase1:
         metadata_file: str = "output/metadata.jsonl",
         metadatagen_file: str = "output/metadatagen.jsonl",
         batch_name: str = "zimageturbo",
-        num_copies: int = 10
+        num_copies: int = 10,
+        chapter_metadata_file: str = "output/pegasus_chapter_metadata.jsonl",
+        cast_file: str = "output/gemini_chapter_cast.jsonl",
+        transcript_file: str = "output/audiotranscript.jsonl",
+        pegasus_metadata_file: str = "output/pegasus_metadata.jsonl",
     ):
         """
         Initialize Phase 1 processor
@@ -37,10 +49,140 @@ class PromptGenerationPhase1:
         self.metadatagen_file = metadatagen_file
         self.batch_name = batch_name
         self.num_copies = num_copies
+        self.chapter_metadata_file = Path(chapter_metadata_file)
+        self.cast_file = Path(cast_file)
+        self.transcript_file = Path(transcript_file)
+        self.pegasus_metadata_file = Path(pegasus_metadata_file)
         self.gcp_prompter = GCPVisionPrompter()
+        self.cast_records = self._load_indexed_jsonl(
+            self.cast_file,
+            "chapter_number",
+        )
+        self.pegasus_records = self._load_indexed_jsonl(
+            self.pegasus_metadata_file,
+            "scene_index",
+        )
+        with self.transcript_file.open("r", encoding="utf-8") as source:
+            self.transcript_items = [
+                json.loads(line) for line in source if line.strip()
+            ]
         
         # Create output directory if needed
         Path(metadatagen_file).parent.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _load_indexed_jsonl(path: Path, key: str) -> Dict[int, Dict]:
+        if not path.is_file():
+            raise FileNotFoundError(f"Required context file is missing: {path}")
+        records = {}
+        with path.open("r", encoding="utf-8") as source:
+            for line in source:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if record.get(key) is not None:
+                    records[int(record[key])] = record
+        return records
+
+    @staticmethod
+    def _normalized_identity(value: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+        return normalized.replace("linden", "lindon")
+
+    def _relevant_cast(
+        self,
+        cast_record: Dict,
+        summary: str,
+        transcript: str,
+    ) -> List[Dict]:
+        highlighted = " ".join(re.findall(r"\|\|(.*?)\|\|", summary))
+        evidence = self._normalized_identity(
+            f"{highlighted or summary}\n{transcript}"
+        )
+        processed = cast_record.get("processed_targets", [])
+        relevant = []
+        for index, character in enumerate(cast_record.get("cast", [])):
+            source = processed[index] if index < len(processed) else {}
+            names = {
+                str(character.get("character_name") or ""),
+                str(source.get("target_name") or ""),
+                str(source.get("canonical_character_name") or ""),
+            }
+            normalized_names = {
+                self._normalized_identity(name)
+                for name in names
+                if name and not name.casefold().startswith("unknown")
+            }
+            if not any(name and name in evidence for name in normalized_names):
+                continue
+            details = copy.deepcopy(character.get("character_details") or {})
+            details.pop("pose_and_composition", None)
+            relevant.append(
+                {
+                    "character_name": character.get("character_name"),
+                    "character_details": details,
+                }
+            )
+        return relevant
+
+    def _contextual_image_prompt(self, scene: Dict) -> str:
+        scene_index = int(scene["scene_index"])
+        chapter = load_related_chapter(
+            self.chapter_metadata_file,
+            scene_index,
+        )
+        chapter_number = int(chapter["chapter_index"])
+        cast_record = self.cast_records.get(chapter_number)
+        if not cast_record or cast_record.get("status") != "complete":
+            raise ValueError(
+                f"Complete cast context is missing for chapter {chapter_number}"
+            )
+        summary = prepare_chapter_summary(
+            chapter["chapter_summary"],
+            float(scene["start_time"]),
+            float(scene["end_time"]),
+            timecode_offset=float(
+                chapter.get("movie_start_time_seconds") or 0
+            ),
+        )
+        speaker_names = {
+            guess["speaker_id"]: guess["character_name_guess"]
+            for guess in chapter.get("speaker_name_guesses", [])
+            if guess.get("speaker_id") and guess.get("character_name_guess")
+        }
+        transcript = load_clip_transcript(
+            self.transcript_file,
+            float(scene["start_time"]),
+            float(scene["end_time"]),
+            speaker_names,
+            transcript_items=self.transcript_items,
+        )
+        pegasus = self.pegasus_records.get(scene_index, {})
+        clip_description = pegasus.get("description") or (
+            "No Pegasus clip description is available; rely on the source "
+            "frame and chapter continuity."
+        )
+        cast = self._relevant_cast(cast_record, summary, transcript)
+        context = {
+            "scene_index": scene_index,
+            "chapter_number": chapter_number,
+            "clip_description": clip_description,
+            "chapter_summary": summary,
+            "clip_transcript": transcript,
+            "cast": cast,
+        }
+        return (
+            DEFAULT_PROMPT
+            + "\n\nUse the below JSON only as grounding context for identity, "
+            "continuity, actions, scenery, and lore. The attached source image "
+            "is authoritative for composition, framing, camera angle, pose, "
+            "visible objects, and visible character count. The chapter-summary "
+            "sentence surrounded by || is the portion relevant to this clip. "
+            "Use character_details only for characters relevant and visible in "
+            "the attached frame. Do not introduce off-screen characters or "
+            "objects from surrounding chapter context.\n"
+            + json.dumps(context, ensure_ascii=False)
+        )
     
     def _load_metadata(self) -> List[Dict]:
         """Load scenes from metadata.jsonl"""
@@ -64,7 +206,11 @@ class PromptGenerationPhase1:
                     try:
                         data = json.loads(line)
                         frame_file = data.get('frame_file')
-                        if frame_file:
+                        if (
+                            frame_file
+                            and str(data.get("prompt_text") or "").strip()
+                            and data.get("gcp_success") is True
+                        ):
                             processed.add(frame_file)
                     except json.JSONDecodeError:
                         continue
@@ -92,6 +238,7 @@ class PromptGenerationPhase1:
         self,
         frame_path: str,
         scene_index: int,
+        prompt: str,
         max_retries: int = 5
     ) -> Dict:
         """
@@ -118,7 +265,10 @@ class PromptGenerationPhase1:
                 )
 
             try:
-                result = self.gcp_prompter.generate_prompt(frame_path)
+                result = self.gcp_prompter.generate_prompt(
+                    frame_path,
+                    prompt=prompt,
+                )
                 
                 if result["success"]:
                     return result
@@ -148,11 +298,96 @@ class PromptGenerationPhase1:
         
         return {"success": False, "error": "Retryable API failure persisted after maximum attempts"}
     
+    def _load_metadatagen_entries(self) -> List[Dict]:
+        path = Path(self.metadatagen_file)
+        if not path.is_file():
+            return []
+        with path.open("r", encoding="utf-8") as source:
+            return [json.loads(line) for line in source if line.strip()]
+
+    def _save_metadatagen_entries(self) -> None:
+        path = Path(self.metadatagen_file)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as destination:
+            temporary_path = Path(destination.name)
+            for entry in self._existing_entries:
+                destination.write(
+                    json.dumps(entry, ensure_ascii=False) + "\n"
+                )
+        os.replace(temporary_path, path)
+
     def _write_metadata_entries(self, entries: List[Dict]):
-        """Write metadata entries to file"""
-        with open(self.metadatagen_file, 'a') as f:
-            for entry in entries:
-                f.write(json.dumps(entry) + '\n')
+        """Update matching generation slots and persist atomically."""
+        for entry in entries:
+            key = (entry.get("frame_file"), entry.get("gen_sequence"))
+            existing = self._existing_index.get(key)
+            if existing is None:
+                self._existing_entries.append(entry)
+                self._existing_index[key] = entry
+            else:
+                existing.update(entry)
+        self._save_metadatagen_entries()
+
+    def _ensure_generation_slots(self, unique_frames: List[Dict]) -> int:
+        """Backfill missing copy slots for frames that already have a prompt.
+
+        ``num_copies`` is a target total per source frame. This lets a frame
+        generated first with one copy be resumed later with ten copies without
+        replacing sequence 1 or requesting the same prompt from Gemini again.
+        """
+        added_entries = []
+        for frame_info in unique_frames:
+            frame_file = frame_info["frame_file"]
+            existing_for_frame = [
+                entry
+                for entry in self._existing_entries
+                if entry.get("frame_file") == frame_file
+            ]
+            prompt_source = next(
+                (
+                    entry
+                    for entry in existing_for_frame
+                    if str(entry.get("prompt_text") or "").strip()
+                    and entry.get("gcp_success") is True
+                ),
+                None,
+            )
+            if prompt_source is None:
+                continue
+
+            existing_sequences = {
+                entry.get("gen_sequence") for entry in existing_for_frame
+            }
+            for gen_sequence in range(1, self.num_copies + 1):
+                if gen_sequence in existing_sequences:
+                    continue
+                entry = copy.deepcopy(prompt_source)
+                entry.update(
+                    {
+                        "batch_name": self.batch_name,
+                        "gen_sequence": gen_sequence,
+                        "seed": None,
+                        "similarity_score": None,
+                        "gen_filename": None,
+                        "generation_success": None,
+                        "generation_error": None,
+                        "generation_timestamp": None,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                )
+                added_entries.append(entry)
+                self._existing_entries.append(entry)
+                self._existing_index[(frame_file, gen_sequence)] = entry
+                existing_sequences.add(gen_sequence)
+
+        if added_entries:
+            self._save_metadatagen_entries()
+        return len(added_entries)
     
     def process_all_frames(
         self, 
@@ -177,11 +412,23 @@ class PromptGenerationPhase1:
         print(f"\nLoading scenes from {self.metadata_file}...")
         scenes = self._load_metadata()
         print(f"Found {len(scenes)} scenes")
+        self._existing_entries = self._load_metadatagen_entries()
+        self._existing_index = {
+            (entry.get("frame_file"), entry.get("gen_sequence")): entry
+            for entry in self._existing_entries
+        }
         
         # Get unique frames
         print("\nExtracting unique frames...")
         unique_frames = self._get_unique_frames(scenes)
         print(f"Found {len(unique_frames)} unique frames to process")
+
+        added_slots = self._ensure_generation_slots(unique_frames)
+        if added_slots:
+            print(
+                f"Added {added_slots} missing generation slots to reach "
+                f"{self.num_copies} copies per previously prompted frame"
+            )
         
         # Get already processed frames if resuming
         processed_frames = set()
@@ -205,7 +452,9 @@ class PromptGenerationPhase1:
                 "success": True,
                 "total_frames": len(unique_frames),
                 "processed_frames": len(processed_frames),
-                "new_frames": 0
+                "new_frames": 0,
+                "successful": 0,
+                "failed": 0,
             }
         
         # Process frames
@@ -233,10 +482,12 @@ class PromptGenerationPhase1:
                 continue
             
             try:
+                contextual_prompt = self._contextual_image_prompt(scene)
                 # Call GCP Vision API with backoff
                 gcp_result = self._call_gcp_with_backoff(
                     str(frame_path),
-                    scene_index=scene.get("scene_index")
+                    scene_index=scene.get("scene_index"),
+                    prompt=contextual_prompt,
                 )
                 
                 if gcp_result["success"]:

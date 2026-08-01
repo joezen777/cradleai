@@ -7,6 +7,8 @@ Sequentially processes each generation and updates metadata with results
 import json
 import os
 import random
+import time
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Tuple
 from datetime import datetime
@@ -66,9 +68,20 @@ class ImageGenerationPhase2:
     
     def _save_metadatagen(self, entries: List[Dict]):
         """Save all entries to metadatagen.jsonl"""
-        with open(self.metadatagen_file, 'w') as f:
+        path = Path(self.metadatagen_file)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as destination:
+            temporary_path = Path(destination.name)
             for entry in entries:
-                f.write(json.dumps(entry) + '\n')
+                destination.write(
+                    json.dumps(entry, ensure_ascii=False) + "\n"
+                )
+        os.replace(temporary_path, path)
     
     def _get_pending_entries(self, entries: List[Dict]) -> List[Dict]:
         """Get entries that still need image generation"""
@@ -159,159 +172,178 @@ class ImageGenerationPhase2:
         return entry
     
     def process_all_clips(
-        self, 
+        self,
         max_clips: int = None,
-        save_interval: int = 10
+        save_interval: int = 10,
+        cooldown_seconds: float = 5.0,
     ) -> Dict:
         """
-        Process all clip files and generate images
-        
-        Args:
-            max_clips: Maximum number of clips to process (for testing)
-            save_interval: Save metadata every N generations
-            
-        Returns:
-            Processing results
+        Generate one source frame batch at a time, then score it separately.
+
+        For each source frame this queues every pending generation, waits for
+        all ComfyUI jobs, releases ComfyUI VRAM, persists filenames, waits for
+        the cooldown, calculates PiDiNet/LPIPS scores, persists again, and only
+        then advances to the next source frame.
         """
-        print("="*80)
-        print("PHASE 2: Generating images from prompts")
-        print("="*80)
-        
-        # Load all entries
-        print(f"\nLoading metadata from {self.metadatagen_file}...")
+        print("=" * 80)
+        print("PHASE 2: Batched ComfyUI generation, then similarity scoring")
+        print("=" * 80)
+
         all_entries = self._load_metadatagen()
-        print(f"Loaded {len(all_entries)} entries")
-        
-        # Get pending entries
         pending_entries = self._get_pending_entries(all_entries)
+        print(f"Loaded {len(all_entries)} entries")
         print(f"Found {len(pending_entries)} pending entries")
-        
-        if len(pending_entries) == 0:
-            print("No pending entries. Phase 2 complete!")
+
+        if not pending_entries:
             return {
                 "success": True,
                 "total_entries": len(all_entries),
                 "processed_entries": 0,
                 "successful_generations": 0,
-                "failed_generations": 0
+                "failed_generations": 0,
             }
-        
-        # Group by clip_file
+
         grouped = self._group_by_clip_file(pending_entries)
-        print(f"Found {len(grouped)} distinct clip files")
-        
-        # Apply max_clips limit if specified
-        clip_files = list(grouped.keys())
+        clip_files = list(grouped)
         if max_clips:
             clip_files = clip_files[:max_clips]
-        
         print(f"Processing {len(clip_files)} clip files")
-        
-        # Process each clip file
+
         successful_generations = 0
         failed_generations = 0
         total_processed = 0
         last_successful_frame = None
-        
-        for i, clip_file in enumerate(clip_files, 1):
+
+        for clip_number, clip_file in enumerate(clip_files, 1):
             clip_entries = grouped[clip_file]
-            
-            # Get batch name and prompt from first entry (gen_sequence=1)
-            first_entry = None
+            frame_groups = {}
             for entry in clip_entries:
-                if entry.get('gen_sequence') == 1:
-                    first_entry = entry
-                    break
-            
-            if not first_entry:
-                print(f"\n[{i}/{len(clip_files)}] ⚠ No gen_sequence=1 entry for {clip_file}")
-                continue
-            
-            batch_name = first_entry.get('batch_name', 'gens')
-            prompt_text = first_entry.get('prompt_text')
-            
-            print(f"\n[{i}/{len(clip_files)}] Processing clip: {clip_file}")
-            print(f"  Batch: {batch_name}")
-            print(f"  Generations: {len(clip_entries)}")
-            print(f"  Prompt preview: {prompt_text[:100] if prompt_text else 'None'}...")
-            
-            if not prompt_text:
-                print(f"  ⚠ No prompt text available, skipping clip")
-                for entry in clip_entries:
-                    entry['generation_success'] = False
-                    entry['generation_error'] = 'No prompt text available'
-                    entry['generation_timestamp'] = datetime.now().isoformat()
-                    failed_generations += 1
-                continue
-            
-            # Setup output directory
-            batch_output_dir = os.path.join("output/frames", batch_name)
-            os.makedirs(batch_output_dir, exist_ok=True)
-            
-            # Process each entry (generation sequence)
-            for entry in clip_entries:
-                frame_file = entry.get('frame_file')
-                
-                # Resolve frame path for similarity scoring
-                normalized_frame_file = frame_file.replace("\\", "/") if frame_file else None
-                frame_path = os.path.join("output", normalized_frame_file) if normalized_frame_file else None
+                frame_groups.setdefault(entry.get("frame_file"), []).append(entry)
+
+            print()
+            print(f"[{clip_number}/{len(clip_files)}] Clip: {clip_file}")
+            print(f"  Source-frame batches: {len(frame_groups)}")
+
+            for frame_number, (frame_file, frame_entries) in enumerate(
+                frame_groups.items(), 1
+            ):
+                frame_entries.sort(key=lambda item: item.get("gen_sequence", 0))
+                normalized = frame_file.replace("\\", "/") if frame_file else None
+                frame_path = os.path.join("output", normalized) if normalized else None
                 if not frame_path or not os.path.exists(frame_path):
                     frame_path = None
-                
-                # Generate image and update entry
-                updated_entry = self._generate_single_image(
-                    entry, frame_path, batch_output_dir
+
+                batch_name = frame_entries[0].get("batch_name", "gens")
+                batch_output_dir = os.path.join("output/frames", batch_name)
+                os.makedirs(batch_output_dir, exist_ok=True)
+                print(
+                    f"  Frame {frame_number}/{len(frame_groups)}: {frame_file} "
+                    f"({len(frame_entries)} jobs)"
                 )
-                
-                # Update in all_entries
-                for j, all_entry in enumerate(all_entries):
-                    if all_entry.get('frame_file') == entry.get('frame_file') and \
-                       all_entry.get('gen_sequence') == entry.get('gen_sequence'):
-                        all_entries[j] = updated_entry
-                        break
-                
-                total_processed += 1
-                
-                # Update counters
-                if updated_entry.get('generation_success'):
-                    successful_generations += 1
-                    last_successful_frame = frame_file
-                else:
-                    failed_generations += 1
-                
-                # Save periodically
-                if total_processed % save_interval == 0:
-                    print(f"  💾 Saving progress ({total_processed} entries processed)...")
+
+                queued_jobs = []
+                generated_entries = []
+
+                # Phase A: queue every generation for this source frame.
+                for entry in frame_entries:
+                    seed = random.randint(0, 2**32 - 1)
+                    sequence = entry.get("gen_sequence")
+                    try:
+                        queued = self.comfy_processor.queue_image(
+                            prompt_text=entry["prompt_text"],
+                            seed=seed,
+                            output_dir=batch_output_dir,
+                            gen_sequence=sequence,
+                        )
+                        queued_jobs.append((entry, queued))
+                        print(
+                            f"    Queued sequence {sequence}: "
+                            f"{queued['prompt_id']}"
+                        )
+                    except Exception as exc:
+                        entry["seed"] = seed
+                        entry["gen_filename"] = None
+                        entry["similarity_score"] = None
+                        entry["generation_success"] = False
+                        entry["generation_error"] = str(exc)
+                        entry["generation_timestamp"] = datetime.now().isoformat()
+                        failed_generations += 1
+                        total_processed += 1
+                        self.logger.error(
+                            f"Queue failed for {frame_file}: {exc}"
+                        )
+
+                # Phase B: wait for and download every queued generation.
+                for entry, queued in queued_jobs:
+                    try:
+                        result = self.comfy_processor.collect_queued_image(queued)
+                        entry["seed"] = result["seed"]
+                        entry["gen_filename"] = result["gen_filename"]
+                        entry["similarity_score"] = None
+                        entry["generation_success"] = True
+                        entry["generation_error"] = None
+                        entry["generation_timestamp"] = datetime.now().isoformat()
+                        generated_entries.append(entry)
+                        successful_generations += 1
+                        last_successful_frame = frame_file
+                        print(f"    Generated: {result['gen_filename']}")
+                    except Exception as exc:
+                        entry["seed"] = queued["seed"]
+                        entry["gen_filename"] = None
+                        entry["similarity_score"] = None
+                        entry["generation_success"] = False
+                        entry["generation_error"] = str(exc)
+                        entry["generation_timestamp"] = datetime.now().isoformat()
+                        failed_generations += 1
+                        self.logger.error(
+                            f"Generation failed for {frame_file}: {exc}"
+                        )
+                    total_processed += 1
+
+                # Phase C: release generation models, cool down, then persist
+                # filenames before any similarity model is loaded.
+                self.comfy_processor.release_comfy_vram()
+                print(f"  Cooling down for {cooldown_seconds:.1f} seconds")
+                time.sleep(cooldown_seconds)
+                self._save_metadatagen(all_entries)
+                print("  Generated filenames saved")
+
+                # Phase D: load PiDiNet/LPIPS only for this completed batch.
+                if frame_path and generated_entries:
+                    print("  Calculating PiDiNet similarities")
+                    for entry in generated_entries:
+                        score = self.comfy_processor.calculate_similarity(
+                            frame_path,
+                            entry["gen_filename"],
+                        )
+                        entry["similarity_score"] = score
+                        print(
+                            f"    Sequence {entry['gen_sequence']}: "
+                            f"{score:.2f}%"
+                        )
+                    self.comfy_processor.release_similarity_models()
                     self._save_metadatagen(all_entries)
-            
-            # Save after each clip
-            print(f"  💾 Saving progress after clip {i}...")
-            self._save_metadatagen(all_entries)
-        
-        # Final save
-        print(f"\n💾 Final save...")
+                    print("  Similarity scores saved")
+
+                if total_processed % save_interval == 0:
+                    self._save_metadatagen(all_entries)
+
         self._save_metadatagen(all_entries)
-        
-        # Summary
-        print("\n" + "="*80)
+        print()
+        print("=" * 80)
         print("PHASE 2 COMPLETE")
-        print("="*80)
-        print(f"Total entries: {len(all_entries)}")
+        print("=" * 80)
         print(f"Processed: {total_processed}")
         print(f"Successful: {successful_generations}")
         print(f"Failed: {failed_generations}")
-        print(f"Output file: {self.metadatagen_file}")
-        
-        if last_successful_frame:
-            print(f"Last successful frame: {last_successful_frame}")
-        
+
         return {
             "success": failed_generations == 0,
             "total_entries": len(all_entries),
             "processed_entries": total_processed,
             "successful_generations": successful_generations,
             "failed_generations": failed_generations,
-            "last_successful_frame": last_successful_frame
+            "last_successful_frame": last_successful_frame,
         }
 
 

@@ -245,7 +245,9 @@ class ComfyUIWorkflowProcessor:
         self.workflow_file = workflow_file
         self.endpoint = endpoint
         self.workflow = self._load_workflow()
-        self.similarity_scorer = SimilarityScorer()
+        # Similarity models are intentionally lazy-loaded only after ComfyUI
+        # has completed and released a full generation batch.
+        self.similarity_scorer = None
     
     def _load_workflow(self) -> Dict:
         """Load ComfyUI workflow from JSON file"""
@@ -326,7 +328,7 @@ class ComfyUIWorkflowProcessor:
         else:
             raise Exception(f"Failed to queue prompt: {response.text}")
     
-    def _wait_for_completion(self, prompt_id: str, timeout: int = 300) -> Dict:
+    def _wait_for_completion(self, prompt_id: str, timeout: int = 3600) -> Dict:
         """
         Wait for workflow execution to complete
         
@@ -354,7 +356,7 @@ class ComfyUIWorkflowProcessor:
         
         raise Exception(f"Timeout waiting for prompt {prompt_id}")
     
-    def _get_output_image(self, prompt_id: str) -> str:
+    def _get_output_image(self, prompt_id: str, timeout: int = 3600) -> str:
         """
         Get the output image from ComfyUI
         
@@ -364,22 +366,93 @@ class ComfyUIWorkflowProcessor:
         Returns:
             Path to downloaded image
         """
-        history = self._wait_for_completion(prompt_id)
+        history = self._wait_for_completion(prompt_id, timeout=timeout)
         outputs = history.get('outputs', {})
         
         for node_id, node_output in outputs.items():
             if 'images' in node_output and len(node_output['images']) > 0:
                 image_info = node_output['images'][0]
                 
-                # Download image
-                image_url = f"{self.endpoint}/view?filename={image_info['filename']}&subfolder={image_info.get('subfolder', '')}&type={image_info['type']}"
-                response = requests.get(image_url)
-                
-                if response.status_code == 200:
-                    return image_info['filename']
+                return image_info['filename']
         
         raise Exception("No output image found")
-    
+
+    def queue_image(
+        self,
+        prompt_text: str,
+        seed: int,
+        output_dir: str,
+        gen_sequence: int
+    ) -> Dict:
+        """Queue one ComfyUI generation without waiting or scoring."""
+        os.makedirs(output_dir, exist_ok=True)
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        filename_prefix = f"zimageturbo/{date_str}_"
+        workflow = self._modify_workflow(prompt_text, seed, filename_prefix)
+        prompt_id = self._queue_prompt(workflow)
+        return {
+            "prompt_id": prompt_id,
+            "seed": seed,
+            "gen_sequence": gen_sequence,
+            "output_dir": output_dir,
+        }
+
+    def collect_queued_image(self, queued: Dict) -> Dict:
+        """Wait for a queued job, download it, and return generation metadata."""
+        output_filename = self._get_output_image(
+            queued["prompt_id"],
+            timeout=int(queued.get("timeout", 3600)),
+        )
+        image_url = (
+            f"{self.endpoint}/view?filename={output_filename}"
+            "&subfolder=zimageturbo&type=output"
+        )
+        response = requests.get(image_url, timeout=60)
+        response.raise_for_status()
+        local_filename = output_filename.replace("zimageturbo/", "")
+        local_path = os.path.join(queued["output_dir"], local_filename)
+        with open(local_path, "wb") as output:
+            output.write(response.content)
+        return {
+            "success": True,
+            "gen_filename": local_path,
+            "seed": queued["seed"],
+            "gen_sequence": queued["gen_sequence"],
+            "similarity_score": None,
+            "output_filename": output_filename,
+        }
+
+    def release_comfy_vram(self) -> None:
+        """Ask ComfyUI to unload models and release cached VRAM."""
+        try:
+            response = requests.post(
+                f"{self.endpoint}/free",
+                json={"unload_models": True, "free_memory": True},
+                timeout=30,
+            )
+            response.raise_for_status()
+            print("  ComfyUI VRAM release requested")
+        except Exception as exc:
+            print(f"  Warning: ComfyUI VRAM release request failed: {exc}")
+
+    def calculate_similarity(self, original_path: str, generated_path: str) -> float:
+        """Lazy-load PiDiNet/LPIPS and calculate one similarity score."""
+        if self.similarity_scorer is None:
+            self.similarity_scorer = SimilarityScorer()
+        return self.similarity_scorer.calculate_similarity_score(
+            original_path,
+            generated_path,
+        )
+
+    def release_similarity_models(self) -> None:
+        """Release PiDiNet/LPIPS before returning control to ComfyUI."""
+        if self.similarity_scorer is not None:
+            del self.similarity_scorer
+            self.similarity_scorer = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print("  PiDiNet/LPIPS released")
+
     def generate_image(
         self, 
         prompt_text: str, 
@@ -431,7 +504,7 @@ class ComfyUIWorkflowProcessor:
                 # Calculate similarity score if original frame provided
                 similarity_score = None
                 if original_frame_path and os.path.exists(original_frame_path):
-                    similarity_score = self.similarity_scorer.calculate_similarity_score(
+                    similarity_score = self.calculate_similarity(
                         original_frame_path, local_path
                     )
                 
