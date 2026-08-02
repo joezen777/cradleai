@@ -68,7 +68,8 @@ DEFAULT_LORE_MCP_URL = "http://127.0.0.1:8765/mcp/"
 DEFAULT_LORE_CONTEXT_CHARS = 24_000
 
 CLIP_LORE_RESPONSE_PROMPT = """
-Return one valid JSON object with exactly these five keys:
+Output must begin with { and end with }. Return one valid JSON object with
+exactly these five keys:
 {
   "video_description": "visible evidence only",
   "dialog": [{"speaker": "name or visual label", "transcript": "audible words", "screen_position": "position"}],
@@ -76,14 +77,30 @@ Return one valid JSON object with exactly these five keys:
   "scenery_lore": "visible setting followed by source-grounded guidance",
   "magic_lore": "visible or strongly supported fantastical elements, otherwise empty"
 }
-Do not add Markdown fences or commentary outside the JSON object. The attached
+Do not add Markdown fences or commentary outside the JSON object.
+
+First inventory what is actually visible in the attached pixels. A character
+belongs in characters_lore only when a human or human-like figure is visibly
+drawn in this specific image or video. A character mentioned by the user or an
+MCP passage is not therefore visible. When the frame contains only a fruit and
+plate, characters_lore must be []. video_description must be non-empty and must
+describe that visible composition.
+
+The attached
 media is primary evidence and MCP passages are secondary lore guidance. Never
 replace visible evidence with lore. For a still image, return an empty dialog
 list because no speech is audible. Do not call an object a pumpkin when the MCP
 identifies it as an orus fruit; describe visible shape separately from its
 source-grounded identity. Do not invent colors, materials, lenses, lighting,
 characters, actions, or locations that are not visible or cited.
+Every source-grounded claim must include its MCP passage ID in lore_guidance,
+scenery_lore, or magic_lore. Plot actions from before or after the attached
+frame are context, not visible_description or video_description.
 """.strip()
+
+CLIP_LORE_KEYS = (
+    "video_description", "dialog", "characters_lore", "scenery_lore", "magic_lore",
+)
 
 
 def call_lore_mcp(url: str, description: str, max_locations: int = 3) -> dict[str, Any]:
@@ -218,6 +235,31 @@ def format_lore_context(
         "chapter, page, or passage identifiers when useful. Distinguish exact source "
         "descriptions from macro scenery and from your own inference."
     )
+
+
+def normalize_clip_lore_answer(answer: str) -> tuple[str, bool]:
+    """Canonicalize valid model JSON and reject prose/fenced schema drift."""
+    candidate = answer.strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", candidate, re.DOTALL | re.I)
+    if fenced:
+        candidate = fenced.group(1).strip()
+    try:
+        value = json.loads(candidate)
+    except (json.JSONDecodeError, TypeError):
+        return answer, False
+    if not isinstance(value, dict):
+        return answer, False
+    normalized = {
+        "video_description": str(value.get("video_description") or ""),
+        "dialog": value.get("dialog") if isinstance(value.get("dialog"), list) else [],
+        "characters_lore": (
+            value.get("characters_lore")
+            if isinstance(value.get("characters_lore"), list) else []
+        ),
+        "scenery_lore": str(value.get("scenery_lore") or ""),
+        "magic_lore": str(value.get("magic_lore") or ""),
+    }
+    return json.dumps(normalized, ensure_ascii=False, indent=2), True
 
 
 class ProgressSpinner:
@@ -539,6 +581,52 @@ def print_models(active: str) -> None:
         print(f" {marker} {alias:<18} {spec['description']}")
 
 
+def inspect_visible_media(
+    model: Any,
+    processor: Any,
+    family: str,
+    media: list[tuple[str, Path]],
+    torch_module: Any,
+    process_vision_info: Any,
+) -> str:
+    """Run a short lore-free pass that anchors the production response."""
+    if not media or family == "text":
+        return "No visual media was supplied."
+    content: list[dict[str, Any]] = []
+    for media_type, path in media:
+        item: dict[str, Any] = {"type": media_type, media_type: str(path)}
+        if media_type == "image":
+            item.update({"min_pixels": 256 * 28 * 28, "max_pixels": 1024 * 28 * 28})
+        else:
+            item.update({"max_pixels": 512 * 28 * 28, "fps": 1.0})
+        content.append(item)
+    content.append({
+        "type": "text",
+        "text": (
+            "LORE-FREE VISIBLE INVENTORY. Describe only what is visibly drawn in the "
+            "attached pixels. State the count of visible human or human-like figures. "
+            "List visible objects, composition, monochrome/color status, and setting. "
+            "Do not identify characters or objects from story knowledge. Be concise."
+        ),
+    })
+    messages = [{"role": "user", "content": content}]
+    rendered = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    image_inputs, video_inputs = process_vision_info(messages)
+    inputs = processor(
+        text=[rendered], images=image_inputs, videos=video_inputs,
+        padding=True, return_tensors="pt",
+    ).to(model.device)
+    with torch_module.inference_mode():
+        generated = model.generate(**inputs, max_new_tokens=180, do_sample=False)
+    continuation = generated[:, inputs.input_ids.shape[1]:]
+    inventory = processor.batch_decode(continuation, skip_special_tokens=True)[0].strip()
+    inputs = generated = continuation = None
+    release_turn_memory(torch_module)
+    return inventory
+
+
 def main() -> int:
     launch_cwd = Path.cwd().resolve()
     args = parse_args()
@@ -703,6 +791,29 @@ def main() -> int:
                 )
                 continue
 
+            if args.response_mode == "clip-lore" and media:
+                inventory_spinner = ProgressSpinner("Inspecting visible media")
+                try:
+                    inventory_spinner.start()
+                    visible_inventory = inspect_visible_media(
+                        model, processor, active_spec["family"], media,
+                        torch, process_vision_info,
+                    )
+                    inventory_spinner.stop()
+                    model_prompt = (
+                        f"{model_prompt}\n\nAUTHORITATIVE LORE-FREE VISIBLE INVENTORY:\n"
+                        f"{visible_inventory}\n\n"
+                        "Use this inventory to decide what is visible. MCP names and events "
+                        "may supply guidance but cannot add visible people or objects."
+                    )
+                    print(f"Visible inventory: {visible_inventory}")
+                except Exception as exc:
+                    inventory_spinner.stop()
+                    print(
+                        f"Visible inventory failed ({type(exc).__name__}: {exc}); "
+                        "continuing with direct media analysis."
+                    )
+
             if active_spec["family"] == "text":
                 content: Any = model_prompt
             else:
@@ -760,6 +871,10 @@ def main() -> int:
                 answer = processor.batch_decode(
                     continuation, skip_special_tokens=True
                 )[0].strip()
+                if args.response_mode == "clip-lore":
+                    answer, valid_json = normalize_clip_lore_answer(answer)
+                    if not valid_json:
+                        print("\nWarning: clip-lore response was not valid JSON.")
                 print(f"\n{active_alias}> {answer}")
                 messages.append({"role": "assistant", "content": answer})
                 messages = trim_history(messages, args.max_history_turns)

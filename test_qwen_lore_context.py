@@ -1,7 +1,9 @@
 import json
 import unittest
 
-from qwen_media_chat import compact_lore_context, format_lore_context
+from qwen_media_chat import (
+    compact_lore_context, format_lore_context, normalize_clip_lore_answer,
+)
 
 
 class LoreContextCompactionTests(unittest.TestCase):
@@ -57,6 +59,19 @@ class LoreContextCompactionTests(unittest.TestCase):
         formatted = format_lore_context(result, max_chars=4000)
         self.assertLess(len(formatted), 5500)
         self.assertIn('"passage_id": "p1"', formatted)
+
+    def test_normalizes_fenced_clip_lore_json(self):
+        answer, valid = normalize_clip_lore_answer(
+            '```json\n{"video_description":"fruit", "dialog": []}\n```'
+        )
+        parsed = json.loads(answer)
+        self.assertTrue(valid)
+        self.assertEqual(parsed["video_description"], "fruit")
+        self.assertEqual(parsed["characters_lore"], [])
+        self.assertEqual(set(parsed), {
+            "video_description", "dialog", "characters_lore",
+            "scenery_lore", "magic_lore",
+        })
 
 
 if __name__ == "__main__":
