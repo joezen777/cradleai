@@ -1,0 +1,10 @@
+pypdf>=6,<7
+real-ladybug==0.15.3
+sentence-transformers>=5,<6
+transformers>=4.57,<5
+accelerate>=1.2
+bitsandbytes>=0.45
+fastapi>=0.116,<1
+uvicorn[standard]>=0.35,<1
+mcp[cli]>=1.20,<2
+pillow>=11,<13

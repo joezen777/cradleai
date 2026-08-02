@@ -1,0 +1,22 @@
+CREATE NODE TABLE IF NOT EXISTS Book(book_id STRING PRIMARY KEY, title STRING, author STRING, series_number INT64, pdf STRING, pdf_sha256 STRING);
+CREATE NODE TABLE IF NOT EXISTS Chapter(chapter_id STRING PRIMARY KEY, book_id STRING, chapter_number INT64, label STRING, treatment STRING, treatment_status STRING);
+CREATE NODE TABLE IF NOT EXISTS Passage(passage_id STRING PRIMARY KEY, chapter_id STRING, book_id STRING, sequence INT64, page_start INT64, page_end INT64, word_count INT64, sha256 STRING, text STRING, embedding FLOAT[1024]);
+CREATE NODE TABLE IF NOT EXISTS Character(character_id STRING PRIMARY KEY, canonical_name STRING, stable_label STRING, named BOOL, aliases STRING, confidence STRING, notes STRING);
+CREATE NODE TABLE IF NOT EXISTS Setting(setting_id STRING PRIMARY KEY, canonical_name STRING, setting_type STRING, notes STRING);
+CREATE NODE TABLE IF NOT EXISTS Item(item_id STRING PRIMARY KEY, canonical_name STRING, item_type STRING, notes STRING);
+CREATE NODE TABLE IF NOT EXISTS Description(description_id STRING PRIMARY KEY, description_type STRING, exact_quote STRING, normalized_description STRING, confidence STRING);
+CREATE NODE TABLE IF NOT EXISTS Appearance(appearance_id STRING PRIMARY KEY, ordinal INT64, visually_present BOOL, action_summary STRING);
+
+CREATE REL TABLE IF NOT EXISTS ContainsChapter(FROM Book TO Chapter);
+CREATE REL TABLE IF NOT EXISTS ContainsPassage(FROM Chapter TO Passage);
+CREATE REL TABLE IF NOT EXISTS CharacterAppearance(FROM Character TO Appearance);
+CREATE REL TABLE IF NOT EXISTS AppearancePassage(FROM Appearance TO Passage);
+CREATE REL TABLE IF NOT EXISTS AppearanceSetting(FROM Appearance TO Setting);
+CREATE REL TABLE IF NOT EXISTS MentionedIn(FROM Character TO Chapter, mention_count INT64);
+CREATE REL TABLE IF NOT EXISTS DescriptionSource(FROM Description TO Passage);
+CREATE REL TABLE IF NOT EXISTS DescribesCharacter(FROM Description TO Character);
+CREATE REL TABLE IF NOT EXISTS DescribesSetting(FROM Description TO Setting);
+CREATE REL TABLE IF NOT EXISTS DescribesItem(FROM Description TO Item);
+CREATE REL TABLE IF NOT EXISTS ItemFoundAt(FROM Item TO Setting);
+CREATE REL TABLE IF NOT EXISTS ItemMentionedIn(FROM Item TO Chapter);
+CREATE REL TABLE IF NOT EXISTS CharacterItem(FROM Character TO Item, relationship STRING, passage_id STRING);

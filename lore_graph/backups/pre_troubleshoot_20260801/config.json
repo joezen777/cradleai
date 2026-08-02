@@ -1,0 +1,27 @@
+{
+  "books": [
+    {
+      "book_id": "unsouled",
+      "series_number": 1,
+      "title": "Unsouled",
+      "author": "Will Wight",
+      "pdf": "../1unsouled.pdf"
+    },
+    {
+      "book_id": "soulsmith",
+      "series_number": 2,
+      "title": "Soulsmith",
+      "author": "Will Wight",
+      "pdf": "../2soulsmith.pdf"
+    }
+  ],
+  "chunking": {
+    "target_words": 450,
+    "maximum_words": 650,
+    "overlap_paragraphs": 1
+  },
+  "embedding_model": "BAAI/bge-m3",
+  "embedding_dimensions": 1024,
+  "extraction_model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "local_lore_model": "../models/Mistral-Nemo-Instruct-2407-bnb-4bit"
+}
