@@ -2,6 +2,8 @@
 .credentials
 .credentials.json
 *.key
+*.pdf
+*.Identifier
 *.pem
 *.json.backup
 

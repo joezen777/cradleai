@@ -27,17 +27,52 @@ DEFAULT_CLIPS_DIR = ROOT / "output" / "clips"
 DEFAULT_OUTPUT = ROOT / "output" / "twelvelabs_clip_descriptions.jsonl"
 API_URL = "https://api.twelvelabs.io/v1.3/analyze"
 MODEL = "pegasus1.5"
+PROMPT_VERSION = 5
 PROMPT = """Describe only what is visibly happening in this video clip. Write one
 continuous paragraph of 200 to 500 words with no heading, bullets, JSON, or
-other formatting. Give a clear chronological account of the visible characters
-or people, their appearance and general screen position, their actions and
-interactions, objects or props they use, and the general scenery, setting,
+other formatting. Give a clear chronological account of every visible character
+or person and their exact screen position and arrangement relative to the other
+characters, scenery, and important props. For each character, document posture,
+body orientation, weight distribution, pose, limb and hand positions, physical
+actions, interactions, and changes over the clip. Document head direction and
+eye direction separately, including what the eyes appear to be looking toward.
+Describe the emotional expression on every visible face with nuance: inspect
+eyebrows, eyelids, eye openness, cheeks, mouth shape, lips, jaw tension, and any
+change or mixed emotion rather than reducing expressions to generic labels.
+
+This is a storyboard animatic, not finished animation. Interpret held drawings
+as key poses sustained for editing and timing; do NOT conclude that a character
+is standing frozen, motionless, or merely posing because one drawing remains on
+screen. Reconstruct the intended continuous physical action as it would read in
+a fully animated scene. Infer motion direction, transitions, follow-through,
+gaze shifts, reactions, and interactions from changes between drawings, pose
+lines, camera movement, framing, visual effects, adjacent action, and scene
+continuity. Distinguish clearly between intended character motion and literal
+camera pans or zooms across a held drawing. Do not invent a specific action when
+the storyboard supplies no evidence; in that case describe the most cautious
+plausible intended movement and identify the uncertainty.
+Never summarize an animatic character as frozen, motionless, unchanged,
+remaining in the same pose, or having no significant movement. Even in a quiet
+exchange, describe the intended breathing, attention, gaze, facial reaction,
+weight shift, cloth follow-through, or transition between held key poses that a
+finished performance would contain, without exaggerating it into a new action.
+
+Carefully document anything covering a face or head. Describe its color,
+material, construction, layering or wrapping pattern, openings, markings,
+fasteners, loose ends, and which facial areas remain visible. Carefully document
+necklaces, cords, pendants, badges, medallions, and other neck-worn objects,
+including their shape, material, color, markings, attachment method, exact
+position on the neck or chest, and whether they move or become obscured. Never
+relocate a neck-worn object to a belt, sash, shoulder, or pocket.
+
+Also describe general appearance, clothing, objects or props, scenery, setting,
 lighting, and important visual effects. Mention camera framing or movement only
 when it helps explain what is shown. Do not identify characters by name, infer
 story lore, transcribe dialogue, speculate about motives, or claim details that
-are not visually supported. If an element is unclear, describe it cautiously in
-ordinary visual terms. This description will become context for another model
-that sees this clip and the clips immediately before and after it."""
+are not visually supported. If eye direction, expression, a marking, or an
+accessory is unclear, explicitly say it is unclear and describe only what is
+visible. This description will become grounding context for another model that
+sees this clip and the clips immediately before and after it."""
 
 
 class ClipDescriptionError(RuntimeError):
@@ -67,6 +102,32 @@ def normalize_paragraph(text: str) -> str:
     text = text.strip()
     text = re.sub(r"^```(?:text)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def validate_animatic_motion(description: str) -> None:
+    """Reject literal held-frame interpretations so the caller can retry."""
+    forbidden = (
+        "no significant changes or movements",
+        "no significant movement",
+        "remains motionless",
+        "remain motionless",
+        "posture unchanged",
+        "postures unchanged",
+        "posture remains unchanged",
+        "postures remain unchanged",
+        "pose remains unchanged",
+        "poses remain unchanged",
+        "remains in the same pose",
+        "remain in the same pose",
+        "remaining in the same position",
+        "remain in the same position",
+    )
+    lowered = description.casefold()
+    matches = [phrase for phrase in forbidden if phrase in lowered]
+    if matches:
+        raise ClipDescriptionError(
+            "Animatic motion validation failed: " + ", ".join(matches)
+        )
 
 
 def video_duration(clip: Path) -> float:
@@ -193,6 +254,7 @@ def describe_clip(clip: Path, api_key: str, timeout: float) -> tuple[str, dict[s
     )
     if not description:
         raise ClipDescriptionError(f"TwelveLabs returned no description for {clip.name}")
+    validate_animatic_motion(description)
     stream_metadata = stream_end.get("metadata", {})
     usage_value = body.get("usage") if body else stream_metadata.get("usage")
     usage = usage_value if isinstance(usage_value, dict) else {}

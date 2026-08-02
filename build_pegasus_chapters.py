@@ -37,7 +37,7 @@ DEFAULT_TRANSCRIPT = ROOT / "output" / "audiotranscript.jsonl"
 DEFAULT_OUTPUT = ROOT / "output" / "pegasus_chapter_metadata.jsonl"
 DEFAULT_INDIVIDUAL_RESULTS = ROOT / "output" / "pegasus_metadata.jsonl"
 API_KEY_NAME = "TWELVELABS_API_KEY"
-PROMPT_VERSION = 2
+PROMPT_VERSION = 5
 
 
 def utc_now() -> str:
@@ -244,9 +244,27 @@ evidence alongside the video. Each speaker has only their single longest
 sentence from this chapter; the samples are identity clues, not a complete
 transcript. Return ONLY valid JSON with exactly these keys:
 
+Treat the video as a storyboard animatic representing a continuously animated
+scene. A drawing held for several frames is a timing artifact, not evidence that
+the character is frozen or deliberately standing still. Extrapolate intended
+motion from successive key poses, pose direction, gaze changes, reactions,
+effects, camera movement, framing, adjacent scenes, and action continuity.
+Describe how actions would flow in finished animation, while marking uncertain
+motion cautiously when the storyboard provides insufficient evidence. Do not
+confuse a camera pan or zoom across a held drawing with character movement.
+
 "chapter_summary": a visually grounded chronological summary of approximately
 300-600 words describing characters, actions, interactions, important objects,
-scenery, lighting, visual effects, and useful shot/camera transitions. Every
+scenery, lighting, visual effects, and useful shot/camera transitions. For every
+visible character, preserve exact screen arrangement, posture, body orientation,
+pose, limb and hand positions, head direction, eye direction and apparent gaze
+target. Describe each facial expression with nuance using visible eyebrow,
+eyelid, eye, cheek, mouth, lip, and jaw evidence, including mixed emotions and
+changes over time. Describe facial coverings precisely: color, material,
+construction, individual layers or wraps, openings, markings, fasteners, and
+loose ends. Describe necklaces, cords, pendants, medallions, and badges with
+their visible shape, material, markings, attachment, and exact location on the
+neck or chest; never relocate a neck-worn object to a belt or sash. Every
 sentence MUST begin with its applicable GLOBAL MOVIE time range in square
 brackets, exactly like "[00:04:26.083-00:04:48.500] The character enters the
 room." Put a bracketed time range between every pair of sentences so each

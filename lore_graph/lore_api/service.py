@@ -148,12 +148,31 @@ class LoreService:
         specificity = max(1.0, len(citations) ** 0.5)
         return float(matches + 2 * description_matches + 3 * name_matches) / specificity
 
+    def _passage_query_score(self, passage_id: str, query: str) -> float:
+        """Favor passages containing several distinct pieces of scene evidence."""
+        ignored = {
+            "and", "the", "with", "from", "into", "their", "this", "that",
+            "where", "while", "using", "scene", "frame", "first", "lore",
+        }
+        tokens = {
+            token for token in re.findall(r"[a-z0-9]+", query.casefold())
+            if len(token) > 2 and token not in ignored
+        }
+        if not tokens:
+            return 0.0
+        source = self.index["passages"].get(passage_id, {}).get("text", "").casefold()
+        matched = {token for token in tokens if token in source}
+        # Coverage matters more than repeated generic mentions. The squared
+        # numerator rewards a passage joining multiple clues (Kelsa + Iron +
+        # fruit + family) instead of a broad passage matching only "fruit".
+        return (len(matched) ** 2) / len(tokens)
+
     def locate_lore(self, request: LocateLoreRequest) -> LocateLoreResponse:
         payload = {
             "corpus_fingerprint": self.index["corpus_fingerprint"],
             "request": request.model_dump(),
         }
-        cached = self.cache.get("locate_lore_context", payload, version=1)
+        cached = self.cache.get("locate_lore_context", payload, version=2)
         if cached is not None:
             cached["cache_hit"] = True; return LocateLoreResponse.model_validate(cached)
         parts = []
@@ -163,13 +182,23 @@ class LoreService:
         if request.frame_image: parts.append("VISIBLE FRAME: " + self.images.describe(request.frame_image))
         if request.pegasus_chapter_summary: parts.append("CHAPTER CONTEXT: " + request.pegasus_chapter_summary)
         query = "\n".join(parts)
-        hits = [hit for hit in self.retriever.search(query, request.max_locations * 3)
-                if hit["passage_id"] in self.index["passage_context"]][:request.max_locations]
+        candidates = [
+            hit for hit in self.retriever.search(query, max(30, request.max_locations * 10))
+            if hit["passage_id"] in self.index["passage_context"]
+        ]
+        hits = sorted(
+            candidates,
+            key=lambda hit: (
+                self._passage_query_score(hit["passage_id"], query),
+                hit.get("confidence", 0.0),
+            ),
+            reverse=True,
+        )[:request.max_locations]
         response = LocateLoreResponse(
             matches=[self._result(hit) for hit in hits],
             query_interpretation=query, cache_hit=False,
         )
-        self.cache.put("locate_lore_context", payload, response.model_dump(mode="json"), version=1)
+        self.cache.put("locate_lore_context", payload, response.model_dump(mode="json"), version=2)
         return response
 
     def locate_characters(self, request: CharacterLookupRequest) -> list[CharacterContext]:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Complete Pipeline: Phase 1 (GCP Vision) + Phase 2 (Z-Image Turbo)
+Complete Pipeline: Phase 1 (local grounded variants) + Phase 2 (Z-Image Turbo)
 Runs both phases sequentially with proper error handling and logging
 """
 
@@ -41,7 +41,7 @@ def run_pipeline(
         log_file: Error log file
     """
     print("="*80)
-    print("COMPLETE PIPELINE: GCP Vision + Z-Image Turbo")
+    print("COMPLETE PIPELINE: Local grounded prompt variants + Z-Image Turbo")
     print("="*80)
     print(f"Batch name: {batch_name}")
     print(f"Generations per frame: {num_copies}")
@@ -50,7 +50,7 @@ def run_pipeline(
     # Phase 1: Generate prompts
     if not skip_phase1:
         print("\n" + "="*80)
-        print("STARTING PHASE 1: GCP Vision Prompt Generation")
+        print("STARTING PHASE 1: Local Prompt Variation Generation")
         print("="*80)
         
         phase1_processor = PromptGenerationPhase1(
@@ -60,10 +60,13 @@ def run_pipeline(
             num_copies=num_copies
         )
         
-        phase1_result = phase1_processor.process_all_frames(
-            max_frames=max_frames,
-            resume=True
-        )
+        try:
+            phase1_result = phase1_processor.process_all_frames(
+                max_frames=max_frames,
+                resume=True
+            )
+        finally:
+            phase1_processor.close()
         
         if not phase1_result["success"]:
             print("\n❌ Phase 1 failed. Pipeline stopped.")
@@ -108,7 +111,8 @@ def run_pipeline(
         
         phase2_result = phase2_processor.process_all_clips(
             max_clips=max_clips,
-            save_interval=5
+            save_interval=5,
+            num_copies=num_copies,
         )
         
         if not phase2_result["success"]:
@@ -145,7 +149,7 @@ def run_pipeline(
 def main():
     """Main function for command-line usage"""
     parser = argparse.ArgumentParser(
-        description="Complete Pipeline: GCP Vision + Z-Image Turbo",
+        description="Complete Pipeline: local grounded variants + Z-Image Turbo",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

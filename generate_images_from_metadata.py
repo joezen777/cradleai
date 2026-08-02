@@ -176,6 +176,7 @@ class ImageGenerationPhase2:
         max_clips: int = None,
         save_interval: int = 10,
         cooldown_seconds: float = 5.0,
+        num_copies: int = None,
     ) -> Dict:
         """
         Generate one source frame batch at a time, then score it separately.
@@ -191,6 +192,15 @@ class ImageGenerationPhase2:
 
         all_entries = self._load_metadatagen()
         pending_entries = self._get_pending_entries(all_entries)
+        if num_copies is not None:
+            if num_copies < 1:
+                raise ValueError("num_copies must be at least 1")
+            pending_entries = [
+                entry
+                for entry in pending_entries
+                if isinstance(entry.get("gen_sequence"), int)
+                and 1 <= entry["gen_sequence"] <= num_copies
+            ]
         print(f"Loaded {len(all_entries)} entries")
         print(f"Found {len(pending_entries)} pending entries")
 
@@ -357,6 +367,7 @@ def main():
     parser.add_argument("--endpoint", default="http://127.0.0.1:8188", help="ComfyUI endpoint")
     parser.add_argument("--log_file", default="image_generation_errors.log", help="Error log file")
     parser.add_argument("--max_clips", type=int, help="Maximum clips to process (for testing)")
+    parser.add_argument("--num_copies", type=int, help="Maximum generations per frame")
     parser.add_argument("--save_interval", type=int, default=10, help="Save every N generations")
     
     args = parser.parse_args()
@@ -370,7 +381,8 @@ def main():
     
     result = processor.process_all_clips(
         max_clips=args.max_clips,
-        save_interval=args.save_interval
+        save_interval=args.save_interval,
+        num_copies=args.num_copies,
     )
     
     if result["success"]:

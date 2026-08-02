@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Phase 1: Generate prompts from GCP Vision API for all frames in metadata.jsonl
-Creates multiple entries per frame with different gen_sequence values
+Phase 1: Generate prompts locally from Qwen3-VL, Pegasus, and Gemini cast lore.
+Creates ten controlled prompt variations per source frame.
 """
 
 import json
@@ -14,7 +14,8 @@ import copy
 from pathlib import Path
 from typing import Dict, List, Set
 from datetime import datetime
-from gcp_vision_prompt import DEFAULT_PROMPT, GCPVisionPrompter
+from local_frame_prompt import DEFAULT_PROMPT, LocalFramePrompter
+from prompt_variations import apply_variation
 from retrieve_clip_lore_context import (
     load_clip_transcript,
     load_related_chapter,
@@ -23,7 +24,7 @@ from retrieve_clip_lore_context import (
 
 
 class PromptGenerationPhase1:
-    """Phase 1: Generate prompts using GCP Vision API with exponential backoff"""
+    """Phase 1: Generate grounded prompts using local CUDA models."""
     
     def __init__(
         self,
@@ -53,7 +54,7 @@ class PromptGenerationPhase1:
         self.cast_file = Path(cast_file)
         self.transcript_file = Path(transcript_file)
         self.pegasus_metadata_file = Path(pegasus_metadata_file)
-        self.gcp_prompter = GCPVisionPrompter()
+        self.gcp_prompter = LocalFramePrompter()
         self.cast_records = self._load_indexed_jsonl(
             self.cast_file,
             "chapter_number",
@@ -69,6 +70,9 @@ class PromptGenerationPhase1:
         
         # Create output directory if needed
         Path(metadatagen_file).parent.mkdir(parents=True, exist_ok=True)
+
+    def close(self) -> None:
+        self.gcp_prompter.close()
 
     @staticmethod
     def _load_indexed_jsonl(path: Path, key: str) -> Dict[int, Dict]:
@@ -135,7 +139,7 @@ class PromptGenerationPhase1:
         cast_record = self.cast_records.get(chapter_number)
         if not cast_record or cast_record.get("status") != "complete":
             raise ValueError(
-                f"Complete cast context is missing for chapter {chapter_number}"
+                f"Complete Gemini cast context is missing for chapter {chapter_number}"
             )
         summary = prepare_chapter_summary(
             chapter["chapter_summary"],
@@ -257,13 +261,6 @@ class PromptGenerationPhase1:
         
         for attempt in range(max_retries):
             print(f"  Attempt {attempt + 1}/{max_retries} for {frame_path}")
-            if os.environ.get("ALLOW_GEMINI") != "YES":
-                raise RuntimeError(
-                    f"Prompt text is not filled out for scene index {scene_index}; "
-                    "set ALLOW_GEMINI=YES in order to fetch a prompt text "
-                    "for local processing."
-                )
-
             try:
                 result = self.gcp_prompter.generate_prompt(
                     frame_path,
@@ -338,7 +335,7 @@ class PromptGenerationPhase1:
 
         ``num_copies`` is a target total per source frame. This lets a frame
         generated first with one copy be resumed later with ten copies without
-        replacing sequence 1 or requesting the same prompt from Gemini again.
+        replacing sequence 1 or requesting the same base prompt again.
         """
         added_entries = []
         for frame_info in unique_frames:
@@ -367,10 +364,18 @@ class PromptGenerationPhase1:
                 if gen_sequence in existing_sequences:
                     continue
                 entry = copy.deepcopy(prompt_source)
+                base_prompt = str(
+                    prompt_source.get("base_prompt_text")
+                    or prompt_source.get("prompt_text")
+                )
+                variant_prompt, variation_id = apply_variation(base_prompt, gen_sequence)
                 entry.update(
                     {
                         "batch_name": self.batch_name,
                         "gen_sequence": gen_sequence,
+                        "base_prompt_text": base_prompt,
+                        "prompt_text": variant_prompt,
+                        "variation_id": variation_id,
                         "seed": None,
                         "similarity_score": None,
                         "gen_filename": None,
@@ -392,7 +397,9 @@ class PromptGenerationPhase1:
     def process_all_frames(
         self, 
         max_frames: int = None,
-        resume: bool = True
+        resume: bool = True,
+        scene_filter: Set[int] | None = None,
+        frame_filter: Set[str] | None = None,
     ) -> Dict:
         """
         Process all frames to generate prompts
@@ -405,7 +412,7 @@ class PromptGenerationPhase1:
             Processing results
         """
         print("="*80)
-        print("PHASE 1: Generating prompts from GCP Vision API")
+        print("PHASE 1: Local Qwen3-VL prompts + Pegasus/Gemini grounding")
         print("="*80)
         
         # Load scenes
@@ -421,6 +428,17 @@ class PromptGenerationPhase1:
         # Get unique frames
         print("\nExtracting unique frames...")
         unique_frames = self._get_unique_frames(scenes)
+        if scene_filter:
+            unique_frames = [
+                frame for frame in unique_frames
+                if int(frame["scene"].get("scene_index", -1)) in scene_filter
+            ]
+        if frame_filter:
+            unique_frames = [
+                frame for frame in unique_frames
+                if frame["frame_file"] in frame_filter
+                or Path(frame["frame_file"]).name in frame_filter
+            ]
         print(f"Found {len(unique_frames)} unique frames to process")
 
         added_slots = self._ensure_generation_slots(unique_frames)
@@ -483,7 +501,7 @@ class PromptGenerationPhase1:
             
             try:
                 contextual_prompt = self._contextual_image_prompt(scene)
-                # Call GCP Vision API with backoff
+                # Call the local Qwen3-VL provider with retry/backoff.
                 gcp_result = self._call_gcp_with_backoff(
                     str(frame_path),
                     scene_index=scene.get("scene_index"),
@@ -491,12 +509,15 @@ class PromptGenerationPhase1:
                 )
                 
                 if gcp_result["success"]:
-                    prompt_text = gcp_result["response_text"]
-                    print(f"  ✓ Prompt generated ({len(prompt_text)} chars)")
+                    base_prompt_text = gcp_result["response_text"]
+                    print(f"  ✓ Base prompt generated ({len(base_prompt_text)} chars)")
                     
                     # Create multiple entries with different gen_sequence values
                     entries = []
                     for gen_sequence in range(1, self.num_copies + 1):
+                        prompt_text, variation_id = apply_variation(
+                            base_prompt_text, gen_sequence
+                        )
                         entry = {
                             "batch_name": self.batch_name,
                             "clip_file": scene.get('clip_file'),
@@ -504,12 +525,15 @@ class PromptGenerationPhase1:
                             "frame_type": frame_type,
                             "scene_index": scene.get('scene_index'),
                             "prompt_text": prompt_text,
+                            "base_prompt_text": base_prompt_text,
+                            "variation_id": variation_id,
                             "seed": None,  # Will be set in Phase 2
                             "similarity_score": None,  # Will be set in Phase 2
                             "gen_sequence": gen_sequence,
                             "gen_filename": None,  # Will be set in Phase 2
                             "timestamp": datetime.now().isoformat(),
                             "gcp_success": True,
+                            "prompt_provider": "qwen3-vl-8b-local+mistral-nemo-lore+pegasus",
                             "gcp_error": None
                         }
                         entries.append(entry)
@@ -602,13 +626,19 @@ def main():
     """Main function for command-line usage"""
     import argparse
     
-    parser = argparse.ArgumentParser(description="Phase 1: Generate prompts from GCP Vision API")
+    parser = argparse.ArgumentParser(description="Phase 1: Generate local grounded prompt variants")
     parser.add_argument("--metadata", default="output/metadata.jsonl", help="Input metadata file")
     parser.add_argument("--metadatagen", default="output/metadatagen.jsonl", help="Output metadata file")
     parser.add_argument("--batch_name", default="zimageturbo", help="Batch name")
     parser.add_argument("--num_copies", type=int, default=10, help="Number of copies per frame")
     parser.add_argument("--max_frames", type=int, help="Maximum frames to process (for testing)")
     parser.add_argument("--no_resume", action="store_true", help="Don't resume from existing file")
+    parser.add_argument("--scenes", nargs="*", type=int, help="Only process these scene indices")
+    parser.add_argument(
+        "--frames",
+        nargs="*",
+        help="Only process these exact frame paths or basenames",
+    )
     
     args = parser.parse_args()
     
@@ -619,10 +649,15 @@ def main():
         num_copies=args.num_copies
     )
     
-    result = processor.process_all_frames(
-        max_frames=args.max_frames,
-        resume=not args.no_resume
-    )
+    try:
+        result = processor.process_all_frames(
+            max_frames=args.max_frames,
+            resume=not args.no_resume,
+            scene_filter=set(args.scenes or []),
+            frame_filter=set(args.frames or []),
+        )
+    finally:
+        processor.close()
     
     return 0 if result["success"] else 1
 

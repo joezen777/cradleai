@@ -18,6 +18,7 @@ from describe_clips_twelvelabs import (
     DEFAULT_CLIPS_DIR,
     DEFAULT_CREDENTIALS,
     MODEL,
+    PROMPT_VERSION,
     describe_clip,
     load_credential,
 )
@@ -31,6 +32,7 @@ DEFAULT_TEST_RESULTS = (
 )
 API_KEY_NAME = "TWELVELABS_API_KEY"
 RETRYABLE_MARKERS = (
+    "animatic motion validation failed",
     "description exceeds",
     "http 408",
     "http 409",
@@ -138,6 +140,7 @@ def base_record(scene: dict[str, Any]) -> dict[str, Any]:
         "start_frame": scene.get("start_frame"),
         "end_frame": scene.get("end_frame"),
         "model": MODEL,
+        "prompt_version": PROMPT_VERSION,
     }
 
 
@@ -213,6 +216,7 @@ def is_complete(record: dict[str, Any] | None) -> bool:
     return bool(
         record
         and record.get("status") in {"success", "terminal_error"}
+        and record.get("prompt_version") == PROMPT_VERSION
     )
 
 
@@ -272,6 +276,10 @@ def main() -> int:
         if scene is None:
             continue
         refreshed = {**base_record(scene), **record}
+        # Refresh paths/timecodes without falsely upgrading analysis created
+        # under an older (or previously unversioned) provider prompt.
+        if "prompt_version" not in record:
+            refreshed.pop("prompt_version", None)
         if refreshed != record:
             results[scene_index] = refreshed
             normalized = True
@@ -291,7 +299,7 @@ def main() -> int:
         for scene in scenes
         if (args.start_scene is None or scene["scene_index"] >= args.start_scene)
         and (args.end_scene is None or scene["scene_index"] <= args.end_scene)
-        and (results.get(scene["scene_index"]) or {}).get("status") != "success"
+        and not is_complete(results.get(scene["scene_index"]))
         and (
             args.retry_errors
             or (results.get(scene["scene_index"]) or {}).get("status")
