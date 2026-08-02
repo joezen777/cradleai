@@ -142,7 +142,9 @@ export default function App() {
 
   const loadState = useCallback(async () => {
     try {
-      const response = await fetch("/api/state", { cache: "no-store" });
+      const response = await fetch(import.meta.env.PROD ? "/state.json" : "/api/state", {
+        cache: "no-store"
+      });
       if (!response.ok) throw new Error("Monitor API returned " + response.status);
       const next = await response.json();
       setData(next);
@@ -155,6 +157,7 @@ export default function App() {
 
   useEffect(() => {
     loadState();
+    if (import.meta.env.PROD) return undefined;
     const events = new EventSource("/api/events");
     events.addEventListener("update", loadState);
     events.onerror = () => setError("Live connection interrupted; retrying...");

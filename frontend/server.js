@@ -12,6 +12,10 @@ const generationPath = path.join(outputRoot, "metadatagen.jsonl");
 const pegasusMetadataPath = path.join(outputRoot, "pegasus_metadata.jsonl");
 const chapterMetadataPath = path.join(outputRoot, "pegasus_chapter_metadata.jsonl");
 const chapterCastPath = path.join(outputRoot, "gemini_chapter_cast.jsonl");
+const enrichedChapterCastPath = path.join(
+  outputRoot,
+  "gemini_chapter_cast.before_pegasus_rerun.jsonl"
+);
 const port = Number(process.env.PORT || 4173);
 const host = process.env.HOST || "0.0.0.0";
 const pollMs = 30_000;
@@ -40,7 +44,7 @@ function parseJsonl(filePath) {
     });
 }
 
-function buildState() {
+export function buildState() {
   const metadataRows = parseJsonl(metadataPath);
   const scenes = metadataRows.filter((row) => Number.isFinite(row.scene_index));
   const generations = parseJsonl(generationPath);
@@ -120,8 +124,11 @@ function buildState() {
   const completedFrames = frames.filter((frame) => frame.completedCount > 0).length;
   const completedImages = frames.reduce((sum, frame) => sum + frame.completedCount, 0);
   const chapterRows = parseJsonl(chapterMetadataPath);
-  const castRows = new Map(
+  const currentCastRows = new Map(
     parseJsonl(chapterCastPath).map((row) => [Number(row.chapter_number), row])
+  );
+  const enrichedCastRows = new Map(
+    parseJsonl(enrichedChapterCastPath).map((row) => [Number(row.chapter_number), row])
   );
   const chapters = chapterRows
     .filter((row) => Number.isFinite(Number(row.chapter_index)))
@@ -141,16 +148,39 @@ function buildState() {
             : names.get(String(turn.speaker_id)) || String(turn.speaker_id || "Unknown"),
           text: String(turn.text).replace(/\s+/g, " ").trim()
         }));
-      const castRecord = castRows.get(chapterNumber);
+      const currentCastRecord = currentCastRows.get(chapterNumber);
+      const enrichedCastRecord = enrichedCastRows.get(chapterNumber);
+      const castRecord = enrichedCastRecord?.cast?.some((member) =>
+        member.image_generations?.some((generation) => generation.gen_character_image)
+      ) ? enrichedCastRecord : currentCastRecord;
+      const chapterStem = "chapter_" + String(chapterNumber).padStart(3, "0");
+      const mp4Path = path.join(outputRoot, "pegasus_chapters", chapterStem + ".mp4");
+      const thumbnailPath = path.join(
+        outputRoot,
+        "pegasus_chapter_thumbnails",
+        chapterStem + ".jpg"
+      );
       return {
         id: "chapter-" + chapterNumber,
         chapterNumber,
         sceneIndex: chapterNumber,
         frameType: "chapter",
         label: "Chapter " + String(chapterNumber).padStart(2, "0"),
-        clipUrl: mediaUrl(chapter.aggregate_clip_file),
-        thumbnailUrl: mediaUrl(chapter.thumbnail),
-        displayUrl: mediaUrl(chapter.thumbnail),
+        clipUrl: mediaUrl(
+          fs.existsSync(mp4Path)
+            ? path.relative(outputRoot, mp4Path)
+            : chapter.aggregate_clip_file
+        ),
+        thumbnailUrl: mediaUrl(
+          chapter.thumbnail || (fs.existsSync(thumbnailPath)
+            ? path.relative(outputRoot, thumbnailPath)
+            : null)
+        ),
+        displayUrl: mediaUrl(
+          chapter.thumbnail || (fs.existsSync(thumbnailPath)
+            ? path.relative(outputRoot, thumbnailPath)
+            : null)
+        ),
         movieStartTimecode: chapter.movie_start_timecode,
         movieEndTimecode: chapter.movie_end_timecode,
         durationSeconds: chapter.duration_seconds,
@@ -202,10 +232,10 @@ function buildState() {
 function getSignature() {
   return [
     metadataPath,
-    generationPath,
     pegasusMetadataPath,
     chapterMetadataPath,
-    chapterCastPath
+    chapterCastPath,
+    enrichedChapterCastPath
   ].map((filePath) => {
     try {
       const stat = fs.statSync(filePath);
@@ -224,9 +254,6 @@ function refresh(force = false) {
   const payload = "event: update\ndata: " + JSON.stringify(cache.stats) + "\n\n";
   for (const response of clients) response.write(payload);
 }
-
-refresh(true);
-setInterval(() => refresh(false), pollMs).unref();
 
 app.get("/api/state", (_request, response) => {
   refresh(false);
@@ -264,20 +291,28 @@ app.use((_request, response) => {
   response.sendFile(path.join(here, "dist", "index.html"));
 });
 
-app.listen(port, host, () => {
-  console.log("Cradle Film Monitor:");
-  console.log("  Local:   http://127.0.0.1:" + port);
-  const addresses = Object.values(os.networkInterfaces())
-    .flat()
-    .filter((address) =>
-      address
-      && address.family === "IPv4"
-      && !address.internal
-    )
-    .map((address) => address.address);
-  for (const address of [...new Set(addresses)]) {
-    console.log("  Network: http://" + address + ":" + port);
-  }
-  if (host !== "0.0.0.0") console.log("  Bound to HOST=" + host);
-  console.log("Watching: " + path.relative(projectRoot, generationPath) + " every 30 seconds");
-});
+export function startServer() {
+  refresh(true);
+  setInterval(() => refresh(false), pollMs).unref();
+  return app.listen(port, host, () => {
+    console.log("Cradle Film Monitor:");
+    console.log("  Local:   http://127.0.0.1:" + port);
+    const addresses = Object.values(os.networkInterfaces())
+      .flat()
+      .filter((address) =>
+        address
+        && address.family === "IPv4"
+        && !address.internal
+      )
+      .map((address) => address.address);
+    for (const address of [...new Set(addresses)]) {
+      console.log("  Network: http://" + address + ":" + port);
+    }
+    if (host !== "0.0.0.0") console.log("  Bound to HOST=" + host);
+    console.log("Watching: " + path.relative(projectRoot, generationPath) + " every 30 seconds");
+  });
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  startServer();
+}

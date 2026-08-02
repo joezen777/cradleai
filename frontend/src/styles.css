@@ -196,7 +196,7 @@ body {
   background: #0a0805; font: 9px "IBM Plex Mono", monospace; letter-spacing: .15em;
 }
 .focus-marker span { top: -12px; color: #dcb66a; }
-.focus-marker b { bottom: -13px; color: #f0dfbd; font-weight: 500; }
+.focus-marker b { bottom: -15px; color: #f0dfbd; font-size: 11px; font-weight: 500; }
 
 .inspector {
   overflow-y: auto;
