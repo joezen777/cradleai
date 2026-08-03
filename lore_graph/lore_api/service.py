@@ -13,6 +13,7 @@ from .schemas import (
     CharacterContext, CharacterLookupRequest, LocateLoreRequest, LocateLoreResponse,
     LocationInBook, LoreContextResult, PropContext, PropLookupRequest,
     MacroSceneryContext, SceneryContext, SceneryLookupRequest,
+    GroundEnhanceRequest, GroundEnhanceResponse,
 )
 
 
@@ -35,6 +36,13 @@ class LoreService:
         self.retriever = HybridRetriever(self.root)
         project_root = Path(os.environ.get("CRADLE_PROJECT_ROOT", Path.cwd()))
         self.images = ImageInterpreter(project_root, self.cache)
+        self._ground_enhancer = None
+
+    def ground_enhance(self, request: GroundEnhanceRequest) -> GroundEnhanceResponse:
+        if self._ground_enhancer is None:
+            from .ground_enhancer import GroundEnhancer
+            self._ground_enhancer = GroundEnhancer(self)
+        return self._ground_enhancer.enhance(request)
 
     def _first_location(self, records: list[dict]) -> dict | None:
         if not records: return None
@@ -172,16 +180,26 @@ class LoreService:
             "corpus_fingerprint": self.index["corpus_fingerprint"],
             "request": request.model_dump(),
         }
-        cached = self.cache.get("locate_lore_context", payload, version=2)
+        cached = self.cache.get("locate_lore_context", payload, version=3)
         if cached is not None:
             cached["cache_hit"] = True; return LocateLoreResponse.model_validate(cached)
         parts = []
+        focus_parts = []
         if request.highlighted_summary: parts.append("HIGHLIGHTED EVENT: " + request.highlighted_summary)
-        if request.description: parts.append("DESCRIPTION: " + request.description)
-        if request.transcript: parts.append("DIALOGUE/TRANSCRIPT: " + request.transcript)
-        if request.frame_image: parts.append("VISIBLE FRAME: " + self.images.describe(request.frame_image))
+        if request.highlighted_summary: focus_parts.append(request.highlighted_summary)
+        if request.description:
+            parts.append("DESCRIPTION: " + request.description)
+            focus_parts.append(request.description)
+        if request.transcript:
+            parts.append("DIALOGUE/TRANSCRIPT: " + request.transcript)
+            focus_parts.append(request.transcript)
+        if request.frame_image:
+            frame_description = self.images.describe(request.frame_image)
+            parts.append("VISIBLE FRAME: " + frame_description)
+            focus_parts.append(frame_description)
         if request.pegasus_chapter_summary: parts.append("CHAPTER CONTEXT: " + request.pegasus_chapter_summary)
         query = "\n".join(parts)
+        focus_query = "\n".join(focus_parts) or query
         candidates = [
             hit for hit in self.retriever.search(query, max(30, request.max_locations * 10))
             if hit["passage_id"] in self.index["passage_context"]
@@ -189,7 +207,7 @@ class LoreService:
         hits = sorted(
             candidates,
             key=lambda hit: (
-                self._passage_query_score(hit["passage_id"], query),
+                self._passage_query_score(hit["passage_id"], focus_query),
                 hit.get("confidence", 0.0),
             ),
             reverse=True,
@@ -198,7 +216,7 @@ class LoreService:
             matches=[self._result(hit) for hit in hits],
             query_interpretation=query, cache_hit=False,
         )
-        self.cache.put("locate_lore_context", payload, response.model_dump(mode="json"), version=2)
+        self.cache.put("locate_lore_context", payload, response.model_dump(mode="json"), version=3)
         return response
 
     def locate_characters(self, request: CharacterLookupRequest) -> list[CharacterContext]:

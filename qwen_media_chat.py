@@ -96,6 +96,15 @@ characters, actions, or locations that are not visible or cited.
 Every source-grounded claim must include its MCP passage ID in lore_guidance,
 scenery_lore, or magic_lore. Plot actions from before or after the attached
 frame are context, not visible_description or video_description.
+
+When MCP evidence identifies a visible prop, video_description must first
+describe its visible shape and presentation, then name the source-grounded prop
+identity with an explicit qualifier such as "The cited scene identifies it as
+the restored white orus spirit-fruit." A visibly present supernatural object
+belongs in magic_lore even when it emits no visible effect: explain its cited
+function and state that no active magic is visible in the frame. Do not leave
+magic_lore empty for a cited spirit-fruit, Remnant, construct, sacred treasure,
+or other inherently supernatural object that is visibly present.
 """.strip()
 
 CLIP_LORE_KEYS = (
@@ -131,6 +140,43 @@ def call_lore_mcp(url: str, description: str, max_locations: int = 3) -> dict[st
                     if item_text:
                         return json.loads(item_text)
                 raise RuntimeError("Lore MCP returned no structured or textual result")
+
+    return asyncio.run(call())
+
+
+def call_character_mcp(
+    url: str, character_name_normalized: str, max_results: int = 1
+) -> list[dict[str, Any]]:
+    """Retrieve an exact character dossier through the lore MCP transport."""
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    async def call() -> list[dict[str, Any]]:
+        async with streamable_http_client(url) as streams:
+            async with ClientSession(streams[0], streams[1]) as session:
+                await session.initialize()
+                result = await session.call_tool(
+                    "locate_character_context",
+                    {
+                        "character_name_normalized": character_name_normalized,
+                        "max_results": max_results,
+                    },
+                )
+                if result.isError:
+                    detail = "\n".join(
+                        getattr(item, "text", str(item)) for item in result.content
+                    )
+                    raise RuntimeError(detail or "locate_character_context failed")
+                structured = result.structuredContent
+                if structured is not None:
+                    value: Any = structured.get("result", structured)
+                    return value if isinstance(value, list) else [value]
+                for item in result.content:
+                    item_text = getattr(item, "text", None)
+                    if item_text:
+                        value = json.loads(item_text)
+                        return value if isinstance(value, list) else [value]
+                raise RuntimeError("Character MCP returned no result")
 
     return asyncio.run(call())
 
@@ -260,6 +306,66 @@ def normalize_clip_lore_answer(answer: str) -> tuple[str, bool]:
         "magic_lore": str(value.get("magic_lore") or ""),
     }
     return json.dumps(normalized, ensure_ascii=False, indent=2), True
+
+
+def ground_clip_lore_answer(
+    answer: str,
+    lore_result: dict[str, Any] | None,
+    visible_inventory: str,
+) -> str:
+    """Fuse deterministic MCP identity into already-grounded visual JSON."""
+    if not lore_result:
+        return answer
+    try:
+        value = json.loads(answer)
+    except json.JSONDecodeError:
+        return answer
+
+    inventory_folded = visible_inventory.casefold()
+    if re.search(r"human(?:-like)? figures?:\s*\n?-?\s*0\b", inventory_folded):
+        value["characters_lore"] = []
+
+    passages: list[tuple[str, str]] = []
+    for match in lore_result.get("matches", []):
+        location = match.get("location_in_book") or {}
+        passage_id = str(location.get("passage_id") or "")
+        passage = _trim_text(location.get("surrounding_paragraph"), 9000)
+        passages.append((passage_id, passage))
+    lore_text = " ".join(text for _, text in passages).casefold()
+
+    visible_fruit = "fruit" in inventory_folded or "vegetable" in inventory_folded
+    cited_orus = "orus" in lore_text and ("spirit-fruit" in lore_text or "white orus" in lore_text)
+    if visible_fruit and cited_orus:
+        identity_id = next(
+            (pid for pid, text in passages if "white orus" in text.casefold()),
+            next((pid for pid, text in passages if "spirit-fruit" in text.casefold()), ""),
+        )
+        identity = (
+            "The cited scene identifies the object as the restored white orus "
+            f"spirit-fruit ({identity_id})."
+        )
+        description = str(value.get("video_description") or "").strip()
+        if "orus" not in description.casefold():
+            value["video_description"] = f"{description} {identity}".strip()
+
+        function_id = next(
+            (
+                pid for pid, text in passages
+                if "purifies energy" in text.casefold()
+                or "helping you advance" in text.casefold()
+            ),
+            identity_id,
+        )
+        magic = str(value.get("magic_lore") or "").strip()
+        grounded_magic = (
+            "No active magical effect is visibly drawn. The orus spirit-fruit is "
+            "itself a sacred resource restored to full power; it purifies energy and "
+            f"supports advancement rather than supplying life-aspect power ({function_id})."
+        )
+        if "orus" not in magic.casefold():
+            value["magic_lore"] = f"{magic} {grounded_magic}".strip()
+
+    return json.dumps(value, ensure_ascii=False, indent=2)
 
 
 class ProgressSpinner:
@@ -756,6 +862,8 @@ def main() -> int:
                 continue
 
             model_prompt = prompt
+            lore_result: dict[str, Any] | None = None
+            visible_inventory = ""
             if lore_enabled:
                 spinner = ProgressSpinner("Querying lore MCP")
                 try:
@@ -875,6 +983,10 @@ def main() -> int:
                     answer, valid_json = normalize_clip_lore_answer(answer)
                     if not valid_json:
                         print("\nWarning: clip-lore response was not valid JSON.")
+                    else:
+                        answer = ground_clip_lore_answer(
+                            answer, lore_result, visible_inventory
+                        )
                 print(f"\n{active_alias}> {answer}")
                 messages.append({"role": "assistant", "content": answer})
                 messages = trim_history(messages, args.max_history_turns)

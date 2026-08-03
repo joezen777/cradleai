@@ -22,7 +22,9 @@ def run_pipeline(
     skip_phase2: bool = False,
     workflow_file: str = "zimageturbo_cinematic.json",
     endpoint: str = "http://127.0.0.1:8188",
-    log_file: str = "image_generation_errors.log"
+    log_file: str = "image_generation_errors.log",
+    ground_enhance: bool = True,
+    grounding_confirmations_file: str = "lore_graph/grounding_confirmations.json",
 ):
     """
     Run complete pipeline with both phases
@@ -57,7 +59,9 @@ def run_pipeline(
             metadata_file=metadata_file,
             metadatagen_file=metadatagen_file,
             batch_name=batch_name,
-            num_copies=num_copies
+            num_copies=num_copies,
+            ground_enhance=ground_enhance,
+            grounding_confirmations_file=grounding_confirmations_file,
         )
         
         try:
@@ -185,6 +189,15 @@ Examples:
     # Phase control
     parser.add_argument("--skip_phase1", action="store_true", help="Skip Phase 1")
     parser.add_argument("--skip_phase2", action="store_true", help="Skip Phase 2")
+    parser.add_argument(
+        "--ground-enhance", action=argparse.BooleanOptionalAction, default=True,
+        help="Generate Phase 1 prompts through confirmation-gated lore grounding (default: enabled)",
+    )
+    parser.add_argument(
+        "--grounding-confirmations",
+        default="lore_graph/grounding_confirmations.json",
+        help="JSON map of frame paths to confirmed lore passage IDs",
+    )
     
     args = parser.parse_args()
     
@@ -200,7 +213,9 @@ Examples:
         skip_phase2=args.skip_phase2,
         workflow_file=args.workflow,
         endpoint=args.endpoint,
-        log_file=args.log_file
+        log_file=args.log_file,
+        ground_enhance=args.ground_enhance,
+        grounding_confirmations_file=args.grounding_confirmations,
     )
     
     if result["success"]:

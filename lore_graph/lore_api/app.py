@@ -11,7 +11,7 @@ from mcp.server.fastmcp import FastMCP
 from .schemas import (
     CharacterContext, CharacterLookupRequest, LocateLoreRequest,
     LocateLoreResponse, PropContext, PropLookupRequest, SceneryContext,
-    SceneryLookupRequest,
+    SceneryLookupRequest, GroundEnhanceRequest, GroundEnhanceResponse,
 )
 from .service import LoreService
 
@@ -40,6 +40,34 @@ mcp = FastMCP(
     json_response=True,
     streamable_http_path="/",
 )
+
+
+@mcp.tool()
+def ground_enhance(
+    frame_image: str,
+    pegasus_chapter_context: str,
+    highlighted_summary: str | None = None,
+    transcript: str | None = None,
+    visual_reference_description: str | None = None,
+    confirmed_passage_ids: list[str] | None = None,
+    max_locations: int = 5,
+) -> dict:
+    """Ground and enhance a frame through a confirmation-gated local pipeline.
+
+    Call first without `confirmed_passage_ids` to receive ranked, cited book
+    locations. After selecting the correct passage IDs, call again with those
+    IDs to run Pegasus, character, scenery, prop, and Z-Image Turbo stages.
+    """
+    request = GroundEnhanceRequest(
+        frame_image=frame_image,
+        pegasus_chapter_context=pegasus_chapter_context,
+        highlighted_summary=highlighted_summary,
+        transcript=transcript,
+        visual_reference_description=visual_reference_description,
+        confirmed_passage_ids=confirmed_passage_ids or [],
+        max_locations=max_locations,
+    )
+    return service().ground_enhance(request).model_dump(mode="json")
 
 
 @mcp.tool()
@@ -146,6 +174,11 @@ def health() -> dict:
 @app.post("/v1/lore/locate", response_model=LocateLoreResponse)
 def locate_lore_http(request: LocateLoreRequest) -> dict:
     return service().locate_lore(request).model_dump(mode="json")
+
+
+@app.post("/v1/lore/ground-enhance", response_model=GroundEnhanceResponse)
+def ground_enhance_http(request: GroundEnhanceRequest) -> dict:
+    return service().ground_enhance(request).model_dump(mode="json")
 
 
 @app.post("/v1/characters/locate", response_model=list[CharacterContext])

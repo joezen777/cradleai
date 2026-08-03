@@ -55,6 +55,74 @@ body {
   border-bottom-color: #e4b85b;
   background: linear-gradient(0deg, rgba(228,184,91,.1), transparent);
 }
+.clips-tab-menu { position: relative; }
+.clips-tab-menu > button { position: relative; z-index: 2; }
+.batch-submenu {
+  position: absolute;
+  top: calc(100% - 1px);
+  left: 50%;
+  min-width: 285px;
+  transform: translate(-50%, 8px);
+  padding: 7px;
+  border: 1px solid #4a3922;
+  background: rgba(16, 12, 8, .98);
+  box-shadow: 0 14px 32px rgba(0,0,0,.55);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .18s ease, transform .18s ease;
+}
+.clips-tab-menu:hover .batch-submenu,
+.clips-tab-menu:focus-within .batch-submenu,
+.clips-tab-menu.active .batch-submenu {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+}
+.batch-submenu button {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: transparent;
+  color: #d8c29a;
+  text-align: left;
+  cursor: pointer;
+  font: 500 11px "IBM Plex Mono", monospace;
+}
+.batch-submenu button:hover,
+.batch-submenu button.selected {
+  color: #f0c873;
+  border-left-color: #e4b85b;
+  background: rgba(228,184,91,.09);
+}
+.batch-submenu small {
+  color: #8e7d62;
+  font: 10px "IBM Plex Sans", sans-serif;
+  letter-spacing: 0;
+  line-height: 1.35;
+  text-transform: none;
+}
+.batch-context {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 12px 0 -18px;
+  color: #e4b85b;
+  font: 11px "IBM Plex Mono", monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.batch-context small {
+  color: #8e7d62;
+  font: 11px "IBM Plex Sans", sans-serif;
+  letter-spacing: 0;
+  text-transform: none;
+}
 .status-block { width: min(330px, 38vw); text-align: right; }
 .status-block .MuiLinearProgress-root { background: #272017; height: 3px; }
 .live-dot { color: #c54432; font-size: 12px !important; filter: drop-shadow(0 0 5px #c54432); }

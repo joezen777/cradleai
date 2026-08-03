@@ -147,7 +147,7 @@ An MCP client entry can point directly at that URL:
 }
 ```
 
-The same four operations are exposed through MCP tools and REST routes:
+The same five operations are exposed through MCP tools and REST routes:
 
 | MCP tool | REST route | Purpose |
 | --- | --- | --- |
@@ -155,6 +155,38 @@ The same four operations are exposed through MCP tools and REST routes:
 | `locate_character_context` | `POST /v1/characters/locate` | Resolve a normalized character ID or character description, including first mention. |
 | `locate_scenery_context` | `POST /v1/scenery/locate` | Resolve normalized scenery or a location description, including first mention. |
 | `locate_prop_context` | `POST /v1/props/locate` | Return at most ten source-linked prop/wardrobe matches, including first appearances. |
+| `ground_enhance` | `POST /v1/lore/ground-enhance` | Confirm a book location, then locally ground visible characters, scenery, and props and produce a concise Z-Image Turbo prompt. |
+
+`ground_enhance` deliberately uses two calls. The first accepts a frame and
+Pegasus chapter context and returns ranked passage candidates with
+`requires_confirmation: true`. Repeat the call with the selected
+`confirmed_passage_ids` to run the enhancement stages. Each response includes
+an immutable visual inventory. Lore context is reported separately and cannot
+introduce off-frame figures, scenery, or props into the visible description or
+the final ComfyUI prompt. After the category passes, a dedicated
+`continuity_audit` pass rechecks visible count, placement, posture, head and
+eye direction, expression, action, appearance, prop contact, and background
+geometry. A deterministic visual-lock appendix carries those facts into both
+the grounded description and the final ComfyUI prompt. The response cache
+version is bumped whenever these stage contracts change.
+
+The main Z-Image pipeline uses the same staged tool for Phase 1 by default:
+
+```bash
+.venv/bin/python generate_prompts_from_metadata.py \
+  --grounding-confirmations lore_graph/grounding_confirmations.json
+```
+
+The confirmation file maps normalized frame paths to passage IDs returned by
+the first tool call. Frames without confirmations stop at candidate discovery.
+For enhanced frames, `metadatagen.jsonl` preserves
+`grounded_enhanced_description` and `ground_enhancement_stages` immediately
+before `base_prompt_text`, the rich local-model Z-Image refinement. The final
+controlled rendering variant remains in `prompt_text` and is what Phase 2 sends
+to ComfyUI.
+The same record also includes `extracted_facts`, separate source-cited fact
+tables for visible characters, scenery, and props.
+Use `--no-ground-enhance` only to run the legacy Qwen-only prompt path.
 
 Example description-only lookup:
 

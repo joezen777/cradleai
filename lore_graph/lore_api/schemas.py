@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -94,6 +96,86 @@ class LocateLoreResponse(BaseModel):
     matches: list[LoreContextResult]
     query_interpretation: str
     cache_hit: bool
+
+
+class GroundEnhanceRequest(BaseModel):
+    frame_image: str = Field(
+        description="Project-local frame path, base64 string, or image data URI"
+    )
+    pegasus_chapter_context: str = Field(
+        min_length=1,
+        description="Pegasus chapter description/context containing this frame's event",
+    )
+    highlighted_summary: str | None = Field(
+        default=None,
+        description="Optional event-sized excerpt from the Pegasus chapter context",
+    )
+    transcript: str | None = None
+    visual_reference_description: str | None = Field(
+        default=None,
+        description=(
+            "Detailed local vision prompt used only to lock visible camera geometry, "
+            "pose, gaze, action, appearance, and background layout"
+        ),
+    )
+    confirmed_passage_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Passage IDs selected from a prior location-candidate response. "
+            "Enhancement pauses until at least one passage is confirmed."
+        ),
+    )
+    max_locations: int = Field(default=5, ge=1, le=10)
+
+
+class GroundingLocationCandidate(BaseModel):
+    passage_id: str
+    book_title: str
+    chapter_label: str
+    page_start: int
+    page_end: int
+    confidence_rating: float = Field(ge=0.0, le=1.0)
+    event_excerpt: str
+
+
+class FrameVisualInventory(BaseModel):
+    composition: str
+    visible_human_count: int = Field(ge=0)
+    visible_figures: list[str] = Field(default_factory=list)
+    visible_objects: list[str] = Field(default_factory=list)
+    visible_background: list[str] = Field(default_factory=list)
+    setting_visible: bool = False
+    style_and_lighting: str = ""
+    uncertainties: list[str] = Field(default_factory=list)
+    camera_and_framing: str = ""
+    subject_positions: list[str] = Field(default_factory=list)
+    posture_gaze_and_action: list[str] = Field(default_factory=list)
+    visible_appearance: list[str] = Field(default_factory=list)
+    support_and_contact: list[str] = Field(default_factory=list)
+    background_geometry: list[str] = Field(default_factory=list)
+    source_medium: str = ""
+
+
+class GroundEnhancementStage(BaseModel):
+    stage: str
+    description: str
+    context_notes: str = ""
+    evidence_passage_ids: list[str] = Field(default_factory=list)
+    corrections: list[str] = Field(default_factory=list)
+
+
+class GroundEnhanceResponse(BaseModel):
+    status: str = Field(pattern="^(location_candidates|enhanced)$")
+    requires_confirmation: bool
+    frame_description: str
+    visual_inventory: FrameVisualInventory
+    location_candidates: list[GroundingLocationCandidate]
+    confirmed_passage_ids: list[str] = Field(default_factory=list)
+    extracted_facts: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    stages: list[GroundEnhancementStage] = Field(default_factory=list)
+    grounded_enhanced_description: str | None = None
+    zimageturbo_prompt: str | None = None
+    cache_hit: bool = False
 
 
 class CharacterLookupRequest(BaseModel):

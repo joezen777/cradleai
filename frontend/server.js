@@ -12,6 +12,7 @@ const generationPath = path.join(outputRoot, "metadatagen.jsonl");
 const pegasusMetadataPath = path.join(outputRoot, "pegasus_metadata.jsonl");
 const chapterMetadataPath = path.join(outputRoot, "pegasus_chapter_metadata.jsonl");
 const chapterCastPath = path.join(outputRoot, "gemini_chapter_cast.jsonl");
+const batchRegistryPath = path.join(here, "batches.jsonl");
 const enrichedChapterCastPath = path.join(
   outputRoot,
   "gemini_chapter_cast.before_pegasus_rerun.jsonl"
@@ -44,36 +45,51 @@ function parseJsonl(filePath) {
     });
 }
 
-export function buildState() {
+export function buildState(requestedBatch = null) {
   const metadataRows = parseJsonl(metadataPath);
   const scenes = metadataRows.filter((row) => Number.isFinite(row.scene_index));
   const generations = parseJsonl(generationPath);
+  const configuredBatches = parseJsonl(batchRegistryPath)
+    .filter((row) => String(row.batchName || "").trim())
+    .map((row) => ({
+      batchName: String(row.batchName).trim(),
+      batchTip: String(row.batchTip || "").trim(),
+      default: String(row.default).toLowerCase() === "yes"
+    }));
+  const batches = configuredBatches.length
+    ? configuredBatches
+    : [{ batchName: "zimageturbo", batchTip: "", default: true }];
+  const defaultBatch = batches.find((batch) => batch.default)?.batchName || batches[0].batchName;
+  const selectedBatch = batches.some((batch) => batch.batchName === requestedBatch)
+    ? requestedBatch
+    : defaultBatch;
   const clipDescriptions = new Map(
     parseJsonl(pegasusMetadataPath).map((row) => [
       Number(row.scene_index),
       row.description || null
     ])
   );
-  const generationGroups = new Map();
+  function buildFrames(batchName) {
+    const generationGroups = new Map();
+    for (const row of generations) {
+      if (String(row.batch_name || "zimageturbo") !== batchName) continue;
+      const key = normalizeRelative(row.frame_file);
+      if (!key) continue;
+      if (!generationGroups.has(key)) generationGroups.set(key, []);
+      generationGroups.get(key).push(row);
+    }
 
-  for (const row of generations) {
-    const key = normalizeRelative(row.frame_file);
-    if (!key) continue;
-    if (!generationGroups.has(key)) generationGroups.set(key, []);
-    generationGroups.get(key).push(row);
-  }
-
-  const frames = [];
-  for (const scene of scenes) {
-    const frameFields = [
-      ["first_frame_file", "first"],
-      ["last_frame_file", "last"]
-    ];
-    for (const [field, frameType] of frameFields) {
-      const rawFrame = scene[field];
-      if (!rawFrame) continue;
-      const frameFile = normalizeRelative(rawFrame);
-      const rows = generationGroups.get(frameFile) || [];
+    const frames = [];
+    for (const scene of scenes) {
+      const frameFields = [
+        ["first_frame_file", "first"],
+        ["last_frame_file", "last"]
+      ];
+      for (const [field, frameType] of frameFields) {
+        const rawFrame = scene[field];
+        if (!rawFrame) continue;
+        const frameFile = normalizeRelative(rawFrame);
+        const rows = generationGroups.get(frameFile) || [];
       const promptText = rows.find((row) =>
         String(row.prompt_text || "").trim()
       )?.prompt_text || null;
@@ -101,6 +117,7 @@ export function buildState() {
 
       frames.push({
         id: String(scene.scene_index) + "-" + frameType,
+        batchName,
         sceneIndex: scene.scene_index,
         frameType,
         label: "Scene " + String(scene.scene_index).padStart(3, "0") + " / " + frameType,
@@ -114,15 +131,29 @@ export function buildState() {
         promptText,
         generations: slots
       });
+      }
     }
+    frames.sort((a, b) =>
+      a.sceneIndex - b.sceneIndex || (a.frameType === "first" ? -1 : 1)
+    );
+    return frames;
   }
 
-  frames.sort((a, b) =>
-    a.sceneIndex - b.sceneIndex || (a.frameType === "first" ? -1 : 1)
+  const framesByBatch = Object.fromEntries(
+    batches.map((batch) => [batch.batchName, buildFrames(batch.batchName)])
   );
+  const frames = framesByBatch[selectedBatch] || [];
 
   const completedFrames = frames.filter((frame) => frame.completedCount > 0).length;
   const completedImages = frames.reduce((sum, frame) => sum + frame.completedCount, 0);
+  const statsByBatch = Object.fromEntries(
+    Object.entries(framesByBatch).map(([batchName, batchFrames]) => [batchName, {
+      totalFrames: batchFrames.length,
+      completedFrames: batchFrames.filter((frame) => frame.completedCount > 0).length,
+      completedImages: batchFrames.reduce((sum, frame) => sum + frame.completedCount, 0),
+      pendingFrames: batchFrames.filter((frame) => frame.completedCount === 0).length
+    }])
+  );
   const chapterRows = parseJsonl(chapterMetadataPath);
   const currentCastRows = new Map(
     parseJsonl(chapterCastPath).map((row) => [Number(row.chapter_number), row])
@@ -204,6 +235,10 @@ export function buildState() {
 
   return {
     frames,
+    framesByBatch,
+    batches,
+    selectedBatch,
+    statsByBatch,
     chapters,
     stats: {
       totalFrames: frames.length,
@@ -232,10 +267,12 @@ export function buildState() {
 function getSignature() {
   return [
     metadataPath,
+    generationPath,
     pegasusMetadataPath,
     chapterMetadataPath,
     chapterCastPath,
-    enrichedChapterCastPath
+    enrichedChapterCastPath,
+    batchRegistryPath
   ].map((filePath) => {
     try {
       const stat = fs.statSync(filePath);
@@ -255,9 +292,10 @@ function refresh(force = false) {
   for (const response of clients) response.write(payload);
 }
 
-app.get("/api/state", (_request, response) => {
+app.get("/api/state", (request, response) => {
   refresh(false);
-  response.json(cache);
+  const requestedBatch = String(request.query.batch || "").trim();
+  response.json(requestedBatch ? buildState(requestedBatch) : cache);
 });
 
 app.get("/api/events", (request, response) => {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import threading
 from pathlib import Path
 
@@ -77,3 +78,22 @@ class HybridRetriever:
             }
             for pid in ordered
         ]
+
+    def release_model(self) -> None:
+        """Release embedding CUDA memory before a larger synthesis model loads."""
+        with self.lock:
+            if self.model is None:
+                return
+            try:
+                self.model.to("cpu")
+            except Exception:
+                pass
+            self.model = None
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.ipc_collect()
+            except Exception:
+                pass

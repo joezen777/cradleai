@@ -11,6 +11,7 @@ import random
 import re
 import tempfile
 import copy
+import sys
 from pathlib import Path
 from typing import Dict, List, Set
 from datetime import datetime
@@ -36,6 +37,8 @@ class PromptGenerationPhase1:
         cast_file: str = "output/gemini_chapter_cast.jsonl",
         transcript_file: str = "output/audiotranscript.jsonl",
         pegasus_metadata_file: str = "output/pegasus_metadata.jsonl",
+        ground_enhance: bool = True,
+        grounding_confirmations_file: str = "lore_graph/grounding_confirmations.json",
     ):
         """
         Initialize Phase 1 processor
@@ -54,7 +57,11 @@ class PromptGenerationPhase1:
         self.cast_file = Path(cast_file)
         self.transcript_file = Path(transcript_file)
         self.pegasus_metadata_file = Path(pegasus_metadata_file)
-        self.gcp_prompter = LocalFramePrompter()
+        self.ground_enhance = ground_enhance
+        self.grounding_confirmations_file = Path(grounding_confirmations_file)
+        self.gcp_prompter = None
+        self._lore_service = None
+        self.grounding_confirmations = self._load_grounding_confirmations()
         self.cast_records = self._load_indexed_jsonl(
             self.cast_file,
             "chapter_number",
@@ -72,7 +79,30 @@ class PromptGenerationPhase1:
         Path(metadatagen_file).parent.mkdir(parents=True, exist_ok=True)
 
     def close(self) -> None:
-        self.gcp_prompter.close()
+        if self.gcp_prompter is not None:
+            self.gcp_prompter.close()
+
+    def _load_grounding_confirmations(self) -> Dict[str, List[str]]:
+        if not self.ground_enhance:
+            return {}
+        if not self.grounding_confirmations_file.is_file():
+            return {}
+        data = json.loads(self.grounding_confirmations_file.read_text(encoding="utf-8"))
+        frames = data.get("frames", data)
+        return {
+            str(key).replace("\\", "/"): [str(value) for value in values]
+            for key, values in frames.items()
+        }
+
+    def _get_lore_service(self):
+        if self._lore_service is None:
+            lore_root = (Path(__file__).resolve().parent / "lore_graph").resolve()
+            if str(lore_root) not in sys.path:
+                sys.path.insert(0, str(lore_root))
+            from lore_api.service import LoreService
+
+            self._lore_service = LoreService(lore_root)
+        return self._lore_service
 
     @staticmethod
     def _load_indexed_jsonl(path: Path, key: str) -> Dict[int, Dict]:
@@ -129,7 +159,7 @@ class PromptGenerationPhase1:
             )
         return relevant
 
-    def _contextual_image_prompt(self, scene: Dict) -> str:
+    def _scene_context(self, scene: Dict) -> Dict:
         scene_index = int(scene["scene_index"])
         chapter = load_related_chapter(
             self.chapter_metadata_file,
@@ -167,7 +197,7 @@ class PromptGenerationPhase1:
             "frame and chapter continuity."
         )
         cast = self._relevant_cast(cast_record, summary, transcript)
-        context = {
+        return {
             "scene_index": scene_index,
             "chapter_number": chapter_number,
             "clip_description": clip_description,
@@ -175,6 +205,9 @@ class PromptGenerationPhase1:
             "clip_transcript": transcript,
             "cast": cast,
         }
+
+    def _contextual_image_prompt(self, scene: Dict) -> str:
+        context = self._scene_context(scene)
         return (
             DEFAULT_PROMPT
             + "\n\nUse the below JSON only as grounding context for identity, "
@@ -187,6 +220,49 @@ class PromptGenerationPhase1:
             "objects from surrounding chapter context.\n"
             + json.dumps(context, ensure_ascii=False)
         )
+
+    def _ground_enhance_prompt(
+        self,
+        frame_path: Path,
+        frame_file: str,
+        scene: Dict,
+        visual_reference_description: str | None = None,
+    ) -> Dict:
+        service = self._get_lore_service()
+        from lore_api.schemas import GroundEnhanceRequest
+
+        context = self._scene_context(scene)
+        normalized_frame = frame_file.replace("\\", "/")
+        confirmed = self.grounding_confirmations.get(normalized_frame, [])
+        request = GroundEnhanceRequest(
+            frame_image=str(frame_path),
+            pegasus_chapter_context=context["clip_description"],
+            highlighted_summary=context["chapter_summary"],
+            transcript=context["clip_transcript"],
+            visual_reference_description=visual_reference_description,
+            confirmed_passage_ids=confirmed,
+        )
+        response = service.ground_enhance(request)
+        if response.requires_confirmation:
+            candidates = [candidate.model_dump(mode="json") for candidate in response.location_candidates]
+            ids = ", ".join(candidate["passage_id"] for candidate in candidates)
+            return {
+                "success": False,
+                "retryable": False,
+                "error": (
+                    f"Lore confirmation required for {normalized_frame}. Add selected passage IDs "
+                    f"to {self.grounding_confirmations_file}. Candidates: {ids}"
+                ),
+                "grounding_candidates": candidates,
+            }
+        if not response.zimageturbo_prompt:
+            return {"success": False, "retryable": False, "error": "ground_enhance returned no prompt"}
+        return {
+            "success": True,
+            "response_text": response.zimageturbo_prompt,
+            "provider": "cradle-lore-ground-enhance",
+            "grounding": response.model_dump(mode="json"),
+        }
     
     def _load_metadata(self) -> List[Dict]:
         """Load scenes from metadata.jsonl"""
@@ -214,6 +290,16 @@ class PromptGenerationPhase1:
                             frame_file
                             and str(data.get("prompt_text") or "").strip()
                             and data.get("gcp_success") is True
+                            # Existing records from before structured lore
+                            # extraction must be regenerated when the local
+                            # ground-enhance path is enabled. This makes a
+                            # normal resumable pipeline run complete the
+                            # migration instead of silently retaining old
+                            # prompt traces.
+                            and (
+                                not self.ground_enhance
+                                or isinstance(data.get("extracted_facts"), dict)
+                            )
                         ):
                             processed.add(frame_file)
                     except json.JSONDecodeError:
@@ -258,6 +344,8 @@ class PromptGenerationPhase1:
         """
         base_delay = 1.0  # Initial delay in seconds
         max_delay = 60.0  # Maximum delay in seconds
+        if self.gcp_prompter is None:
+            self.gcp_prompter = LocalFramePrompter()
         
         for attempt in range(max_retries):
             print(f"  Attempt {attempt + 1}/{max_retries} for {frame_path}")
@@ -434,10 +522,14 @@ class PromptGenerationPhase1:
                 if int(frame["scene"].get("scene_index", -1)) in scene_filter
             ]
         if frame_filter:
+            normalized_filter = {
+                Path(value.replace("\\", "/")).name for value in frame_filter
+            }
             unique_frames = [
                 frame for frame in unique_frames
                 if frame["frame_file"] in frame_filter
-                or Path(frame["frame_file"]).name in frame_filter
+                or Path(frame["frame_file"].replace("\\", "/")).name
+                in normalized_filter
             ]
         print(f"Found {len(unique_frames)} unique frames to process")
 
@@ -500,17 +592,35 @@ class PromptGenerationPhase1:
                 continue
             
             try:
-                contextual_prompt = self._contextual_image_prompt(scene)
-                # Call the local Qwen3-VL provider with retry/backoff.
-                gcp_result = self._call_gcp_with_backoff(
-                    str(frame_path),
-                    scene_index=scene.get("scene_index"),
-                    prompt=contextual_prompt,
-                )
+                if self.ground_enhance:
+                    prior = self._existing_index.get((frame_file, 1), {})
+                    visual_reference = str(
+                        prior.get("base_prompt_text")
+                        or prior.get("prompt_text")
+                        or ""
+                    ).strip() or None
+                    gcp_result = self._ground_enhance_prompt(
+                        frame_path, frame_file, scene, visual_reference
+                    )
+                else:
+                    contextual_prompt = self._contextual_image_prompt(scene)
+                    gcp_result = self._call_gcp_with_backoff(
+                        str(frame_path),
+                        scene_index=scene.get("scene_index"),
+                        prompt=contextual_prompt,
+                    )
                 
                 if gcp_result["success"]:
                     base_prompt_text = gcp_result["response_text"]
+                    grounding = gcp_result.get("grounding") or {}
+                    previous_entry = self._existing_index.get((frame_file, 1), {})
+                    previous_prompt_text = previous_entry.get("prompt_text")
                     print(f"  ✓ Base prompt generated ({len(base_prompt_text)} chars)")
+                    if grounding.get("grounded_enhanced_description"):
+                        print(
+                            "  ✓ Grounded description preserved before Z-Image refinement "
+                            f"({len(grounding['grounded_enhanced_description'])} chars)"
+                        )
                     
                     # Create multiple entries with different gen_sequence values
                     entries = []
@@ -526,6 +636,16 @@ class PromptGenerationPhase1:
                             "scene_index": scene.get('scene_index'),
                             "prompt_text": prompt_text,
                             "base_prompt_text": base_prompt_text,
+                            "previous_prompt_text": previous_prompt_text,
+                            "grounded_enhanced_description": grounding.get(
+                                "grounded_enhanced_description"
+                            ),
+                            # Keep the structured source-fact extraction
+                            # alongside prose stages so downstream tools and
+                            # trace inspection can distinguish evidence from
+                            # model rewrites.
+                            "extracted_facts": grounding.get("extracted_facts", {}),
+                            "ground_enhancement_stages": grounding.get("stages"),
                             "variation_id": variation_id,
                             "seed": None,  # Will be set in Phase 2
                             "similarity_score": None,  # Will be set in Phase 2
@@ -533,7 +653,8 @@ class PromptGenerationPhase1:
                             "gen_filename": None,  # Will be set in Phase 2
                             "timestamp": datetime.now().isoformat(),
                             "gcp_success": True,
-                            "prompt_provider": "qwen3-vl-8b-local+mistral-nemo-lore+pegasus",
+                            "prompt_provider": gcp_result.get("provider", "qwen3-vl-8b-local"),
+                            "ground_enhance": grounding or None,
                             "gcp_error": None
                         }
                         entries.append(entry)
@@ -565,7 +686,10 @@ class PromptGenerationPhase1:
                             "gen_filename": None,
                             "timestamp": datetime.now().isoformat(),
                             "gcp_success": False,
-                            "gcp_error": error
+                            "gcp_error": error,
+                            "grounding_candidates": gcp_result.get(
+                                "grounding_candidates"
+                            ),
                         }
                         entries.append(entry)
                     
@@ -639,6 +763,15 @@ def main():
         nargs="*",
         help="Only process these exact frame paths or basenames",
     )
+    parser.add_argument(
+        "--ground-enhance", action=argparse.BooleanOptionalAction, default=True,
+        help="Use confirmation-gated cradle-lore ground_enhance for base prompts (default: enabled)",
+    )
+    parser.add_argument(
+        "--grounding-confirmations",
+        default="lore_graph/grounding_confirmations.json",
+        help="JSON map from frame paths to confirmed lore passage IDs",
+    )
     
     args = parser.parse_args()
     
@@ -646,7 +779,9 @@ def main():
         metadata_file=args.metadata,
         metadatagen_file=args.metadatagen,
         batch_name=args.batch_name,
-        num_copies=args.num_copies
+        num_copies=args.num_copies,
+        ground_enhance=args.ground_enhance,
+        grounding_confirmations_file=args.grounding_confirmations,
     )
     
     try:

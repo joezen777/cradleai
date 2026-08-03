@@ -1,0 +1,21 @@
+{
+  "frames/scene_066_first_frame.png": [
+    "unsouled:chapter:2:passage:009",
+    "unsouled:chapter:2:passage:010",
+    "unsouled:chapter:2:passage:011",
+    "unsouled:chapter:3:passage:001"
+  ],
+  "frames/scene_099_first_frame.png": [
+    "unsouled:chapter:3:passage:008",
+    "unsouled:chapter:3:passage:009"
+  ],
+  "frames/scene_114_last_frame.png": [
+    "unsouled:chapter:3:passage:008",
+    "unsouled:chapter:3:passage:009",
+    "unsouled:chapter:3:passage:010"
+  ],
+  "frames/scene_116_last_frame.png": [
+    "unsouled:chapter:3:passage:009",
+    "unsouled:chapter:3:passage:010"
+  ]
+}

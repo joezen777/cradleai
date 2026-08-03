@@ -124,6 +124,7 @@ function CharacterDetails({ details }) {
 export default function App() {
   const [data, setData] = useState(null);
   const [mode, setMode] = useState("clips");
+  const [selectedBatch, setSelectedBatch] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [selectedCastId, setSelectedCastId] = useState(null);
   const [castGenerationIndexes, setCastGenerationIndexes] = useState({});
@@ -148,12 +149,22 @@ export default function App() {
       if (!response.ok) throw new Error("Monitor API returned " + response.status);
       const next = await response.json();
       setData(next);
+      setSelectedBatch((current) => current || next.selectedBatch || next.batches?.[0]?.batchName || null);
       setSelectedId((current) => current || next.frames[0]?.id || null);
       setError("");
     } catch (reason) {
       setError(reason.message);
     }
   }, []);
+
+  const batches = data?.batches || [];
+  const activeBatch = batches.some((batch) => batch.batchName === selectedBatch)
+    ? selectedBatch
+    : data?.selectedBatch || batches[0]?.batchName;
+  const batchFrames = data?.framesByBatch?.[activeBatch] || data?.frames || [];
+  const stats = mode === "clips"
+    ? data?.statsByBatch?.[activeBatch] || data?.stats || {}
+    : data?.stats || {};
 
   useEffect(() => {
     loadState();
@@ -166,23 +177,23 @@ export default function App() {
 
   const selectedIndex = useMemo(
     () => {
-      const items = mode === "clips" ? data?.frames : data?.chapters;
+      const items = mode === "clips" ? batchFrames : data?.chapters;
       return items?.findIndex((item) => item.id === selectedId) ?? -1;
     },
-    [data, mode, selectedId]
+    [batchFrames, data, mode, selectedId]
   );
-  const reelItems = mode === "clips" ? data?.frames || [] : data?.chapters || [];
+  const reelItems = mode === "clips" ? batchFrames : data?.chapters || [];
   const selected = selectedIndex >= 0 ? reelItems[selectedIndex] : null;
   const selectedCast = selected?.cast?.find((member) => member.id === selectedCastId)
     || selected?.cast?.[0]
     || null;
 
   useEffect(() => {
-    const items = mode === "clips" ? data?.frames : data?.chapters;
+    const items = mode === "clips" ? batchFrames : data?.chapters;
     if (items?.length && !items.some((item) => item.id === selectedId)) {
       setSelectedId(items[0].id);
     }
-  }, [data, mode, selectedId]);
+  }, [batchFrames, data, mode, selectedId]);
 
   useEffect(() => {
     setSelectedCastId(selected?.cast?.[0]?.id || null);
@@ -388,8 +399,8 @@ export default function App() {
     return <Box className="loading"><CircularProgress /><Typography>Threading the projector...</Typography></Box>;
   }
 
-  const progress = data.stats.totalFrames
-    ? (data.stats.completedFrames / data.stats.totalFrames) * 100
+  const progress = stats.totalFrames
+    ? (stats.completedFrames / stats.totalFrames) * 100
     : 0;
 
   return (
@@ -403,13 +414,37 @@ export default function App() {
           </div>
         </Stack>
         <nav className="view-tabs" aria-label="Content view">
-          <button
-            type="button"
-            className={mode === "clips" ? "active" : ""}
-            onClick={() => setMode("clips")}
-          >
-            Clips
-          </button>
+          <div className={"clips-tab-menu" + (mode === "clips" ? " active" : "")}>
+            <button
+              type="button"
+              className={mode === "clips" ? "active" : ""}
+              onClick={() => setMode("clips")}
+              aria-haspopup="menu"
+            >
+              Clips
+            </button>
+            {batches.length > 0 && (
+              <div className="batch-submenu" role="menu" aria-label="Clip batches">
+                {batches.map((batch) => (
+                  <button
+                    key={batch.batchName}
+                    type="button"
+                    role="menuitem"
+                    className={activeBatch === batch.batchName ? "selected" : ""}
+                    onClick={() => {
+                      setMode("clips");
+                      setSelectedBatch(batch.batchName);
+                      setSelectedId(null);
+                    }}
+                    title={batch.batchTip}
+                  >
+                    <span>{batch.batchName}</span>
+                    <small>{batch.batchTip}</small>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <button
             type="button"
             className={mode === "chapters" ? "active" : ""}
@@ -425,14 +460,14 @@ export default function App() {
             <Chip
               size="small"
               label={mode === "clips"
-                ? data.stats.completedImages + " renders"
+                ? stats.completedImages + " renders"
                 : data.stats.totalChapters + " chapters"}
             />
           </Stack>
           <LinearProgress variant="determinate" value={progress} />
           <Typography variant="caption" color="text.secondary">
             {mode === "clips"
-              ? `${data.stats.completedFrames} of ${data.stats.totalFrames} frames developed`
+              ? `${stats.completedFrames} of ${stats.totalFrames} frames developed`
               : `${data.stats.chaptersWithCast} chapters with cast metadata`}
           </Typography>
         </Stack>
@@ -446,6 +481,12 @@ export default function App() {
             <span>{mode === "clips" ? "CURRENT FRAME" : "CURRENT CHAPTER"}</span>
             <b>{selected?.label || "---"}</b>
           </div>
+          {mode === "clips" && activeBatch && (
+            <div className="batch-context">
+              <span>{activeBatch}</span>
+              <small>{batches.find((batch) => batch.batchName === activeBatch)?.batchTip}</small>
+            </div>
+          )}
           <div
             className="film-rail"
             ref={railRef}

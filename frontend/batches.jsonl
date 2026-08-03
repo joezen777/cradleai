@@ -1,0 +1,2 @@
+{"batchName":"zimageturbo","batchTip":"Using Gemini for Lore and prompt optimization","default":"yes"}
+{"batchName":"lore+zimageturbo","batchTip":"Using local LLM and RAG to ground, enhance and optimize","default":"no"}

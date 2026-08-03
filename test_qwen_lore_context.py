@@ -2,7 +2,8 @@ import json
 import unittest
 
 from qwen_media_chat import (
-    compact_lore_context, format_lore_context, normalize_clip_lore_answer,
+    compact_lore_context, format_lore_context, ground_clip_lore_answer,
+    normalize_clip_lore_answer,
 )
 
 
@@ -72,6 +73,30 @@ class LoreContextCompactionTests(unittest.TestCase):
             "video_description", "dialog", "characters_lore",
             "scenery_lore", "magic_lore",
         })
+
+    def test_fuses_orus_identity_without_inventing_visible_characters(self):
+        answer = json.dumps({
+            "video_description": "A round segmented fruit is centered in frame.",
+            "dialog": [],
+            "characters_lore": [{"name": "Lindon"}],
+            "scenery_lore": "Gray background.",
+            "magic_lore": "",
+        })
+        lore = {"matches": [{"location_in_book": {
+            "passage_id": "unsouled:chapter:2:passage:010",
+            "surrounding_paragraph": (
+                "Kelsa held up the white orus. This spirit-fruit only purifies "
+                "energy, helping you advance in your Path."
+            ),
+        }}]}
+        inventory = "Count of Human or Human-Like Figures:\n- 0\nVisible: fruit"
+
+        grounded = json.loads(ground_clip_lore_answer(answer, lore, inventory))
+
+        self.assertEqual(grounded["characters_lore"], [])
+        self.assertIn("orus spirit-fruit", grounded["video_description"])
+        self.assertIn("purifies energy", grounded["magic_lore"])
+        self.assertIn("unsouled:chapter:2:passage:010", grounded["magic_lore"])
 
 
 if __name__ == "__main__":
