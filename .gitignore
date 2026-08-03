@@ -47,7 +47,8 @@ env/
 *.sublime-*
 
 # Project-specific outputs
-output/
+output/*
+!output/bookcast_character_images/
 models/
 *.mp4
 *.avi

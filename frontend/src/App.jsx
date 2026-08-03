@@ -121,6 +121,199 @@ function CharacterDetails({ details }) {
   );
 }
 
+function BookCastCard({ member, onExpandImage }) {
+  const primaryImg = member.primaryImageUrl;
+  const initials = member.canonicalName
+    .split(/\s+/)
+    .map((word) => word[0])
+    .filter(Boolean)
+    .slice(0, 2)
+    .join("")
+    .toUpperCase() || "?";
+
+  const details = [
+    { label: "Face", value: member.face },
+    { label: "Skin Tone", value: member.skinTone },
+    { label: "Eyes", value: member.eyes },
+    { label: "Hair", value: member.hair },
+    { label: "Build", value: member.build },
+    { label: "Posture", value: member.posture },
+    { label: "Emotion", value: member.emotion },
+    { label: "Action", value: member.action },
+    { label: "Fighting Move", value: member.fightingMove },
+    { label: "Clothing / Wardrobe", value: member.clothing || member.wardrobe },
+    { label: "Accessories", value: member.accessories },
+    { label: "Color Info", value: member.colorInformation }
+  ].filter((item) => Boolean(item.value));
+
+  return (
+    <article className="bookcast-card" id={member.id}>
+      <div className="bookcast-left">
+        <div className="bookcast-image-container">
+          {primaryImg ? (
+            <img
+              src={primaryImg}
+              alt={member.canonicalName}
+              loading="lazy"
+              onClick={() =>
+                onExpandImage({
+                  url: primaryImg,
+                  title: member.canonicalName,
+                  caption: member.firstAppearanceSubtitle
+                })
+              }
+            />
+          ) : (
+            <div className="bookcast-placeholder">
+              <div className="bookcast-placeholder-initials">{initials}</div>
+              <div className="bookcast-placeholder-label">Image Pending</div>
+            </div>
+          )}
+        </div>
+        <div className="bookcast-image-meta">
+          <span>{primaryImg ? "RENDERED PORTRAIT" : "NO IMAGE YET"}</span>
+          {member.imageGenerations?.[0]?.genaimodel && (
+            <span className="bookcast-model-tag">{member.imageGenerations[0].genaimodel}</span>
+          )}
+        </div>
+      </div>
+
+      <div className="bookcast-right">
+        <div className="bookcast-header">
+          <h2 className="bookcast-title">{member.canonicalName}</h2>
+          <div className="bookcast-subtitle">First Appearance: {member.firstAppearanceSubtitle}</div>
+        </div>
+
+        <div className="bookcast-tags">
+          {member.entityType && (
+            <span className="bookcast-badge entity-type">{member.entityType}</span>
+          )}
+          {member.speciesOrObjectType && (
+            <span className="bookcast-badge">{member.speciesOrObjectType}</span>
+          )}
+          {member.confidence && (
+            <span className="bookcast-badge confidence">Confidence: {member.confidence}</span>
+          )}
+        </div>
+
+        {member.portraitDescription && (
+          <div className="bookcast-section">
+            <span className="bookcast-section-title">Portrait Description</span>
+            <div className="bookcast-section-body">{member.portraitDescription}</div>
+          </div>
+        )}
+
+        {member.zimageturboPrompt && (
+          <div className="bookcast-section">
+            <span className="bookcast-section-title">Optimized Z-Image Turbo Prompt</span>
+            <div className="bookcast-prompt-box">{member.zimageturboPrompt}</div>
+          </div>
+        )}
+
+        {details.length > 0 && (
+          <div className="bookcast-section">
+            <span className="bookcast-section-title">Character Attributes</span>
+            <div className="bookcast-details-grid">
+              {details.map((d, i) => (
+                <div key={i} className="bookcast-detail-item">
+                  <span className="bookcast-detail-label">{d.label}</span>
+                  <span className="bookcast-detail-value">{String(d.value)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {member.evidenceNotes && (
+          <div className="bookcast-section">
+            <span className="bookcast-section-title">Evidence & Provenance</span>
+            <div className="bookcast-evidence-box">{member.evidenceNotes}</div>
+          </div>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function BookCastView({ bookCast, onExpandImage }) {
+  const [search, setSearch] = useState("");
+  const [bookFilter, setBookFilter] = useState("all");
+  const [imageFilter, setImageFilter] = useState("all");
+
+  const filtered = useMemo(() => {
+    return bookCast.filter((member) => {
+      if (search) {
+        const q = search.toLowerCase();
+        const nameMatch = member.canonicalName?.toLowerCase().includes(q);
+        const keyMatch = member.identityKey?.toLowerCase().includes(q);
+        const descMatch = member.portraitDescription?.toLowerCase().includes(q);
+        if (!nameMatch && !keyMatch && !descMatch) return false;
+      }
+      if (bookFilter !== "all") {
+        if (member.firstAppearanceBook?.toLowerCase() !== bookFilter.toLowerCase()) return false;
+      }
+      if (imageFilter === "has_image" && !member.primaryImageUrl) return false;
+      if (imageFilter === "pending" && member.primaryImageUrl) return false;
+      return true;
+    });
+  }, [bookCast, search, bookFilter, imageFilter]);
+
+  return (
+    <div className="bookcast-workspace">
+      <div className="bookcast-toolbar">
+        <div className="bookcast-search-group">
+          <input
+            type="text"
+            className="bookcast-search-input"
+            placeholder="Search cast by name, keywords, or identity..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+        <div className="bookcast-filter-group">
+          <button
+            type="button"
+            className={"bookcast-filter-btn" + (bookFilter === "all" ? " active" : "")}
+            onClick={() => setBookFilter("all")}
+          >
+            All Books
+          </button>
+          <button
+            type="button"
+            className={"bookcast-filter-btn" + (bookFilter === "unsouled" ? " active" : "")}
+            onClick={() => setBookFilter("unsouled")}
+          >
+            Unsouled
+          </button>
+          <button
+            type="button"
+            className={"bookcast-filter-btn" + (bookFilter === "soulsmith" ? " active" : "")}
+            onClick={() => setBookFilter("soulsmith")}
+          >
+            Soulsmith
+          </button>
+          <button
+            type="button"
+            className={"bookcast-filter-btn" + (imageFilter === "has_image" ? " active" : "")}
+            onClick={() => setImageFilter(imageFilter === "has_image" ? "all" : "has_image")}
+          >
+            With Image ({bookCast.filter((c) => c.primaryImageUrl).length})
+          </button>
+        </div>
+        <div className="bookcast-count-badge">
+          Showing {filtered.length} of {bookCast.length} Characters
+        </div>
+      </div>
+
+      <div className="bookcast-grid">
+        {filtered.map((member) => (
+          <BookCastCard key={member.id} member={member} onExpandImage={onExpandImage} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [data, setData] = useState(null);
   const [mode, setMode] = useState("clips");
@@ -452,6 +645,13 @@ export default function App() {
           >
             Chapters
           </button>
+          <button
+            type="button"
+            className={mode === "bookcast" ? "active" : ""}
+            onClick={() => setMode("bookcast")}
+          >
+            Book Cast
+          </button>
         </nav>
         <Stack className="status-block" spacing={0.7}>
           <Stack direction="row" spacing={1} alignItems="center" justifyContent="flex-end">
@@ -459,16 +659,22 @@ export default function App() {
             <Typography variant="caption">LIVE / 30 SEC</Typography>
             <Chip
               size="small"
-              label={mode === "clips"
-                ? stats.completedImages + " renders"
-                : data.stats.totalChapters + " chapters"}
+              label={
+                mode === "clips"
+                  ? stats.completedImages + " renders"
+                  : mode === "chapters"
+                  ? data.stats.totalChapters + " chapters"
+                  : (data.bookCast?.length || 0) + " cast"
+              }
             />
           </Stack>
           <LinearProgress variant="determinate" value={progress} />
           <Typography variant="caption" color="text.secondary">
             {mode === "clips"
               ? `${stats.completedFrames} of ${stats.totalFrames} frames developed`
-              : `${data.stats.chaptersWithCast} chapters with cast metadata`}
+              : mode === "chapters"
+              ? `${data.stats.chaptersWithCast} chapters with cast metadata`
+              : `${data.stats?.bookCastWithImages || 0} of ${data.bookCast?.length || 0} cast with renders`}
           </Typography>
         </Stack>
       </header>
@@ -476,7 +682,14 @@ export default function App() {
       {error && <div className="connection-error">{error}</div>}
 
       <section className="workspace">
-        <div className="reel-column">
+        {mode === "bookcast" ? (
+          <BookCastView
+            bookCast={data.bookCast || []}
+            onExpandImage={(img) => setExpandedImage(img)}
+          />
+        ) : (
+          <>
+            <div className="reel-column">
           <div className="focus-marker">
             <span>{mode === "clips" ? "CURRENT FRAME" : "CURRENT CHAPTER"}</span>
             <b>{selected?.label || "---"}</b>
@@ -730,6 +943,8 @@ export default function App() {
             </>
           )}
         </aside>
+          </>
+        )}
       </section>
 
       <Dialog

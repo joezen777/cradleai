@@ -17,6 +17,7 @@ const enrichedChapterCastPath = path.join(
   outputRoot,
   "gemini_chapter_cast.before_pegasus_rerun.jsonl"
 );
+const bookcastPath = path.join(projectRoot, "bookcast.jsonl");
 const port = Number(process.env.PORT || 4173);
 const host = process.env.HOST || "0.0.0.0";
 const pollMs = 30_000;
@@ -30,8 +31,11 @@ const normalizeRelative = (value = "") => value.replaceAll("\\", "/").replace(/^
 const mediaUrl = (value) => {
   if (!value) return null;
   let normalized = normalizeRelative(value);
-  if (normalized.startsWith("output/")) normalized = normalized.slice(7);
-  return "/media/" + normalized.split("/").map(encodeURIComponent).join("/");
+  const idx = normalized.indexOf("output/");
+  if (idx !== -1) {
+    normalized = normalized.slice(idx + 7);
+  }
+  return "/media/" + normalized.split("/").filter(Boolean).map(encodeURIComponent).join("/");
 };
 
 function parseJsonl(filePath) {
@@ -43,6 +47,139 @@ function parseJsonl(filePath) {
       try { return [JSON.parse(line)]; }
       catch { return []; }
     });
+}
+
+function normName(str) {
+  return String(str || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function parseFirstAppearance(row) {
+  const ev = row.evidence_notes;
+  const books = Array.isArray(row.books) ? row.books : [];
+  let bookName = "";
+  let chapterName = "";
+
+  if (ev && typeof ev === "object") {
+    bookName = ev.book || ev.cited_book || ev.book_id || "";
+    chapterName = ev.chapter || ev.cited_chapter || ev.chapter_id || "";
+    if (!chapterName && ev.passage_id) {
+      const parts = String(ev.passage_id).split(":");
+      if (parts.length >= 3 && parts[1] === "chapter") {
+        chapterName = "Chapter " + parts[2];
+      }
+    }
+  } else if (typeof ev === "string") {
+    const passMatch = ev.match(/([a-z]+):chapter:(\d+)/i);
+    if (passMatch) {
+      bookName = passMatch[1];
+      chapterName = "Chapter " + passMatch[2];
+    } else {
+      const chMatch = ev.match(/chapter\s*(\d+)/i);
+      if (chMatch) chapterName = "Chapter " + chMatch[1];
+      if (/unsouled/i.test(ev)) bookName = "Unsouled";
+      else if (/soulsmith/i.test(ev)) bookName = "Soulsmith";
+    }
+  }
+
+  if (!bookName && books.length) {
+    bookName = books[0];
+  }
+  if (!bookName) bookName = "Unsouled";
+
+  bookName = bookName.trim().charAt(0).toUpperCase() + bookName.trim().slice(1);
+  if (/unsouled/i.test(bookName)) bookName = "Unsouled";
+  if (/soulsmith/i.test(bookName)) bookName = "Soulsmith";
+
+  chapterName = (chapterName || "Chapter 1").trim();
+  if (/^\d+$/.test(chapterName)) chapterName = "Chapter " + chapterName;
+  if (/^chapter:\s*\d+$/i.test(chapterName)) {
+    chapterName = "Chapter " + chapterName.replace(/^chapter:\s*/i, "");
+  }
+  if (/^[a-z]+:chapter:\d+$/i.test(chapterName)) {
+    chapterName = "Chapter " + chapterName.split(":").pop();
+  }
+
+  return { book: bookName, chapter: chapterName, subtitle: `${bookName} • ${chapterName}` };
+}
+
+function buildBookCast() {
+  const rawBookcast = parseJsonl(bookcastPath);
+  if (!rawBookcast.length) return [];
+
+  const imagesByName = new Map();
+  for (const castFile of [enrichedChapterCastPath, chapterCastPath]) {
+    for (const record of parseJsonl(castFile)) {
+      for (const c of record.cast || []) {
+        if (!c.character_name) continue;
+        const key = normName(c.character_name);
+        for (const img of c.image_generations || []) {
+          if (img.gen_character_image) {
+            if (!imagesByName.has(key)) imagesByName.set(key, []);
+            imagesByName.get(key).push({
+              genaimodel: img.genaimodel,
+              celebrityName: img.celebrity_name || null,
+              imageUrl: mediaUrl(img.gen_character_image)
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return rawBookcast.map((item, index) => {
+    const canonicalName = item.canonical_name || "Unknown Character";
+    const identityKey = item.identity_key || "";
+    const k1 = normName(canonicalName);
+    const k2 = normName(identityKey);
+
+    let matched = imagesByName.get(k1) || imagesByName.get(k2) || null;
+    if (!matched) {
+      for (const [key, imgs] of imagesByName.entries()) {
+        if (key.length >= 4 && (k1.includes(key) || key.includes(k1))) {
+          matched = imgs;
+          break;
+        }
+      }
+    }
+
+    let directImgUrl = mediaUrl(item.gen_character_image || item.primary_image_url);
+    if (!directImgUrl && Array.isArray(item.image_generations) && item.image_generations.length) {
+      directImgUrl = mediaUrl(item.image_generations[0].gen_character_image);
+    }
+    const { book, chapter, subtitle } = parseFirstAppearance(item);
+    const finalImageUrl = directImgUrl || matched?.[0]?.imageUrl || null;
+
+    return {
+      id: "bookcast-" + index + "-" + (identityKey || normName(canonicalName)),
+      canonicalName,
+      identityKey,
+      entityType: item.entity_type || "individual person",
+      speciesOrObjectType: item.species_or_object_type || "human",
+      portraitDescription: item.portrait_description || "",
+      zimageturboPrompt: item.zimageturbo_prompt || null,
+      firstAppearanceBook: book,
+      firstAppearanceChapter: chapter,
+      firstAppearanceSubtitle: subtitle,
+      face: item.face || null,
+      skinTone: item.skin_tone || null,
+      eyes: item.eyes || null,
+      hair: item.hair || null,
+      build: item.build || null,
+      posture: item.posture || null,
+      emotion: item.emotion || null,
+      action: item.action || null,
+      fightingMove: item.fighting_move || null,
+      clothing: item.clothing || null,
+      wardrobe: item.wardrobe || null,
+      accessories: item.accessories || null,
+      colorInformation: item.color_information || null,
+      evidenceNotes: typeof item.evidence_notes === "object" ? JSON.stringify(item.evidence_notes) : (item.evidence_notes || null),
+      confidence: item.confidence || "high",
+      qwenModel: item.qwen_model || null,
+      imageGenerations: matched || [],
+      primaryImageUrl: finalImageUrl
+    };
+  });
 }
 
 export function buildState(requestedBatch = null) {
@@ -233,6 +370,8 @@ export function buildState(requestedBatch = null) {
     })
     .sort((a, b) => a.chapterNumber - b.chapterNumber);
 
+  const bookCast = buildBookCast();
+
   return {
     frames,
     framesByBatch,
@@ -240,6 +379,7 @@ export function buildState(requestedBatch = null) {
     selectedBatch,
     statsByBatch,
     chapters,
+    bookCast,
     stats: {
       totalFrames: frames.length,
       completedFrames,
@@ -247,6 +387,8 @@ export function buildState(requestedBatch = null) {
       pendingFrames: frames.length - completedFrames,
       totalChapters: chapters.length,
       chaptersWithCast: chapters.filter((chapter) => chapter.cast.length).length,
+      totalBookCast: bookCast.length,
+      bookCastWithImages: bookCast.filter((c) => c.primaryImageUrl).length,
       castImages: chapters.reduce(
         (total, chapter) =>
           total + chapter.cast.reduce(
@@ -272,7 +414,8 @@ function getSignature() {
     chapterMetadataPath,
     chapterCastPath,
     enrichedChapterCastPath,
-    batchRegistryPath
+    batchRegistryPath,
+    bookcastPath
   ].map((filePath) => {
     try {
       const stat = fs.statSync(filePath);
