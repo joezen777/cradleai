@@ -1,9 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
-const sourceRoot = path.resolve("dist");
-const targetRoot = path.resolve(process.argv[2] || "amplify-artifact");
+const here = path.dirname(fileURLToPath(import.meta.url));
+const frontendRoot = path.resolve(here, "..");
+const sourceRoot = fs.existsSync(path.resolve("dist")) ? path.resolve("dist") : path.join(frontendRoot, "dist");
+const targetRoot = path.isAbsolute(process.argv[2] || "") ? process.argv[2] : path.join(frontendRoot, process.argv[2] || "amplify-artifact");
 const pngJobs = [];
 
 function copyTree(sourceDir) {
