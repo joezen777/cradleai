@@ -15,6 +15,8 @@ from qwen_media_chat import (
     call_character_mcp,
     load_model,
 )
+from bookcast_evidence import descriptive_phrases, split_sentences, true_first_appearance
+from bookcast_fields import compose_portrait, normalize_for_dedup, normalize_trait
 
 
 ROOT = Path(__file__).resolve().parent
@@ -210,27 +212,35 @@ def compact_dossier(source: dict[str, Any], mcp_rows: list[dict[str, Any]]) -> d
     }
 
 
-def evidence_text(dossier: dict[str, Any]) -> str:
-    pieces = [dossier.get("first_mention_excerpt", "")]
-    pieces.extend(value.get("quote", "") for value in dossier.get("exact_visual_quotes", []))
+def character_scoped_evidence(dossier: dict[str, Any]) -> str:
+    """Evidence already tied to this specific character: their own visual
+    quotes and scene actions. Deliberately excludes first_mention_excerpt,
+    which is the raw multi-paragraph passage blob and can run on into other
+    characters' scenes and colors within the same passage (e.g. one child's
+    badge color in a scene describing several children being tested).
+    """
+    pieces = [value.get("quote", "") for value in dossier.get("exact_visual_quotes", [])]
     pieces.extend(dossier.get("mcp_visual_quotes", []))
     pieces.extend(value.get("action", "") for value in dossier.get("scene_actions", []))
     return re.sub(r"\s+", " ", " ".join(str(value) for value in pieces)).strip()
 
 
 def supported_trait(value: Any, evidence: str, anchors: tuple[str, ...]) -> str:
-    value = str(value or "").strip()
-    if not value or value.casefold().startswith("not specified"):
-        return "not specified in the cited text"
+    """Return `value` only if it is corroborated near an anchor word in
+    character-scoped evidence; otherwise "" (unknown, not a filler sentence).
+    """
+    value = normalize_trait(value)
+    if not value:
+        return ""
     folded = evidence.casefold()
     windows = []
     for anchor in anchors:
         start = 0
         while (position := folded.find(anchor, start)) >= 0:
-            windows.append(folded[max(0, position - 100):position + len(anchor) + 100])
+            windows.append(folded[max(0, position - 200):position + len(anchor) + 200])
             start = position + len(anchor)
     if not windows:
-        return "not specified in the cited text"
+        return ""
     ignored = {
         "and", "the", "with", "not", "specified", "cited", "text", "simple",
         "suitable", "functional", "person", "individual", "medium",
@@ -240,71 +250,145 @@ def supported_trait(value: Any, evidence: str, anchors: tuple[str, ...]) -> str:
         if len(token) > 2 and token not in ignored
     }
     if value_tokens and not any(token in " ".join(windows) for token in value_tokens):
-        return "not specified in the cited text"
+        return ""
     return value
 
 
-def cited_colors(evidence: str) -> str:
-    color_words = (
-        "black", "white", "gray", "grey", "brown", "red", "orange", "yellow",
-        "green", "blue", "purple", "pink", "gold", "golden", "silver", "pale",
-        "colorless", "crimson", "scarlet", "violet",
-    )
-    found = []
-    folded = evidence.casefold()
-    for color in color_words:
-        if re.search(rf"\b{re.escape(color)}\b", folded):
-            found.append(color)
-    return "cited color words: " + ", ".join(found) if found else "not specified in the cited text"
+# Anchors widened to cover non-human subjects: a snowfox's "fur" or a
+# construct's "hide" carries the same role a human's "hair" does, but the
+# original anchor lists only had human vocabulary, so real cited description
+# ("five-tailed", "soundless, scentless") was being discarded outright.
+_HAIR_ANCHORS = ("hair", "beard", "eyebrow", "fur", "pelt", "feather", "mane")
+_SKIN_ANCHORS = ("skin", "complexion", "hide", "scale", "scales", "bark")
+_BUILD_ANCHORS = (
+    "build", "shoulder", "muscular", "slender", "lithe", "tall", "short",
+    "broad", "size", "massive", "huge", "small", "tiny", "towering", "height",
+    "length", "wide", "narrow",
+)
+_FACE_ANCHORS = ("face", "scar", "beard", "eye", "muzzle", "snout")
+_CLOTHING_ANCHORS = (
+    "robe", "clothes", "clothing", "wear", "wore", "dressed", "shirt",
+    "coat", "cloak", "jacket", "armor", "mantle",
+)
+_EMOTION_ANCHORS = (
+    "expression", "emotion", "smile", "scowl", "glare", "fear", "angry",
+    "calm", "unperturbed", "hope", "grief", "anxious", "resolve",
+)
+_POSTURE_ANCHORS = (
+    "kneel", "stand", "crouch", "sit", "lean", "wait", "hover", "float",
+    "perch", "poised", "stillness", "motionless",
+)
+
+_COLOR_WORDS = (
+    "black", "white", "gray", "grey", "brown", "red", "orange", "yellow",
+    "green", "blue", "purple", "pink", "gold", "golden", "silver", "pale",
+    "colorless", "crimson", "scarlet", "violet", "emerald", "amber", "ivory",
+    "cyan", "magenta", "turquoise", "indigo",
+    # Deliberately NOT "copper"/"jade": both are sacred-arts advancement
+    # stage names used constantly in this corpus (Copper, Iron, Jade, Gold),
+    # and would false-positive as color citations almost everywhere.
+)
+_COLOR_PATTERN = re.compile(rf"\b({'|'.join(_COLOR_WORDS)})\b", re.IGNORECASE)
+_CLAUSE_SPLIT = re.compile(r"[,;:]|—|–")
+
+
+def cited_colors(character_evidence: str, limit: int = 3) -> str:
+    """Short phrases binding each cited color to its surrounding context,
+    scanned only over character-scoped evidence so a color from a different
+    character's paragraph in the same passage can never attach here.
+
+    Splits on clause boundaries rather than a fixed character window — a
+    character window can straddle a comma and glue two unrelated clauses
+    together into a grammatical mess. A long clause still gets trimmed to a
+    short word window around the color so the result stays brief. Capped low
+    (default 3): prolific characters accumulate quotes across the whole
+    series, and a visual_descriptions quote tagged to one character can still
+    describe someone else standing in the same scene, so preferring the
+    first, closest-to-introduction hits is safer than exhaustive collection.
+    """
+    phrases: list[str] = []
+    seen: set[str] = set()
+    for sentence in split_sentences(character_evidence):
+        for clause in _CLAUSE_SPLIT.split(sentence):
+            clause = clause.strip().rstrip(".")
+            match = _COLOR_PATTERN.search(clause)
+            if not clause or not match:
+                continue
+            words = clause.split()
+            if len(words) > 9:
+                center = len(clause[:match.start()].split())
+                clause = " ".join(words[max(0, center - 3):center + 4])
+            key = re.sub(r"[^a-z0-9 ]", "", clause.casefold())
+            if not clause or key in seen:
+                continue
+            seen.add(key)
+            phrases.append(clause)
+            if len(phrases) >= limit:
+                break
+        if len(phrases) >= limit:
+            break
+    # "; " rather than ", " — each phrase is a clause fragment without its own
+    # terminal punctuation, so comma-joining several reads as one run-on
+    # sentence. A semicolon list makes clear these are separate citations.
+    return "; ".join(phrases)
 
 
 def sanitize_result(result: dict[str, Any], source: dict[str, Any],
                     dossier: dict[str, Any]) -> dict[str, Any]:
-    evidence = evidence_text(dossier)
+    evidence = character_scoped_evidence(dossier)
     result["canonical_name"] = source.get("canonical_name") or source.get("stable_label")
-    result["skin_tone"] = supported_trait(result.get("skin_tone"), evidence, ("skin", "complexion"))
+    result["skin_tone"] = supported_trait(result.get("skin_tone"), evidence, _SKIN_ANCHORS)
     result["eyes"] = supported_trait(result.get("eyes"), evidence, (" eye", "eyes"))
-    result["hair"] = supported_trait(result.get("hair"), evidence, ("hair", "beard", "eyebrow"))
-    result["face"] = supported_trait(result.get("face"), evidence, ("face", "scar", "beard", "eye"))
-    result["build"] = supported_trait(
-        result.get("build"), evidence,
-        ("build", "shoulder", "muscular", "slender", "lithe", "tall", "short", "broad"),
-    )
-    result["clothing"] = supported_trait(
-        result.get("clothing"), evidence,
-        ("robe", "clothes", "clothing", "wear", "wore", "dressed", "shirt", "coat", "cloak"),
-    )
-    result["wardrobe"] = result["clothing"]
-    actions = dossier.get("scene_actions", [])
-    result["action"] = actions[0]["action"] if actions else "not specified in the cited text"
-    result["posture"] = result["action"]
-    result["emotion"] = supported_trait(
-        result.get("emotion"), evidence,
-        ("expression", "emotion", "smile", "scowl", "glare", "fear", "angry", "calm", "unperturbed"),
-    )
-    combat = next((value["action"] for value in actions if value["combat_relevance"]), None)
-    result["fighting_move"] = combat or "not specified in the cited text"
-    items = [value.removeprefix("item:").replace("-", " ") for value in dossier.get("linked_item_ids", [])]
-    result["accessories"] = ", ".join(items) if items else "not specified in the cited text"
-    result["color_information"] = cited_colors(evidence)
-    if identity_key(source) not in SPECIFIC_NONHUMANS and not identity_key(source).endswith("remnant"):
-        result["entity_type"] = "individual person"
-        if not result.get("species_or_object_type") or result["species_or_object_type"] == "unspecified":
-            result["species_or_object_type"] = "human"
+    result["hair"] = supported_trait(result.get("hair"), evidence, _HAIR_ANCHORS)
+    result["face"] = supported_trait(result.get("face"), evidence, _FACE_ANCHORS)
+    result["build"] = supported_trait(result.get("build"), evidence, _BUILD_ANCHORS)
+    result["clothing"] = supported_trait(result.get("clothing"), evidence, _CLOTHING_ANCHORS)
+    result.pop("wardrobe", None)
 
-    details = [
-        f"{result['canonical_name']} is cataloged as {result.get('species_or_object_type') or result.get('entity_type') or 'an individual cast member'}.",
-        f"Face: {result['face']}; skin tone: {result['skin_tone']}; eyes: {result['eyes']}; hair: {result['hair']}; build: {result['build']}.",
-        f"Clothing and wardrobe: {result['clothing']}. Accessories: {result['accessories']}.",
-        f"Portrait pose and action: {result.get('posture') or 'not specified in the cited text'}; {result['action']}",
-        f"Expression or emotion: {result.get('emotion') or 'not specified in the cited text'}.",
-    ]
-    if combat:
-        details.append(f"Use the best-supported combat pose: {combat}.")
-    else:
-        details.append("No distinctive fighting move is specified, so use the cited scene action rather than inventing one.")
-    details.append(f"Cited color information: {result.get('color_information') or 'not specified in the cited text'}.")
-    result["portrait_description"] = " ".join(details)
+    actions = dossier.get("scene_actions", [])
+    result["action"] = actions[0]["action"] if actions else ""
+    # posture is body configuration, not "whatever action was cited" — validate
+    # it independently instead of copying action, which duplicated the same
+    # text in 128/133 of the previous generation's records.
+    result["posture"] = supported_trait(result.get("posture"), evidence, _POSTURE_ANCHORS)
+    result["emotion"] = supported_trait(result.get("emotion"), evidence, _EMOTION_ANCHORS)
+
+    combat = next((value["action"] for value in actions if value["combat_relevance"]), None)
+    fighting_move = combat or ""
+    # Don't emit a fighting move that just restates the action/posture text.
+    if fighting_move and normalize_for_dedup(fighting_move) in (
+        normalize_for_dedup(result["action"]), normalize_for_dedup(result["posture"])
+    ):
+        fighting_move = ""
+    result["fighting_move"] = fighting_move
+
+    items = [value.removeprefix("item:").replace("-", " ") for value in dossier.get("linked_item_ids", [])]
+    result["accessories"] = ", ".join(items) if items else ""
+    result["color_information"] = cited_colors(evidence)
+
+    key = identity_key(source)
+    recognized_nonhuman = key in SPECIFIC_NONHUMANS or key.endswith("remnant")
+    model_species = normalize_trait(result.get("species_or_object_type"))
+    # Trust a model-supplied nonhuman species ("snowfox", "sacred beast")
+    # rather than blindly forcing "individual person" — that override used to
+    # apply even when the model had already correctly classified a literal
+    # animal, leaving contradictory records (species "snowfox", entity_type
+    # "individual person").
+    model_stated_nonhuman = bool(model_species) and model_species.casefold() not in {"human", "unspecified"}
+    if not recognized_nonhuman and not model_stated_nonhuman:
+        result["entity_type"] = "individual person"
+        result["species_or_object_type"] = model_species or "human"
+
+    # Salvage: real visual sentences the trait-by-trait validation above
+    # couldn't attach to a specific field (wrong vocabulary, awkward phrasing)
+    # are not lost — they ride along for Track C's enrichment interview and
+    # for direct display via Track A's descriptive_phrases on the card.
+    anchor_pid = true_first_appearance(source)
+    result["unassigned_visual_facts"] = (
+        descriptive_phrases(source, anchor_pid) if anchor_pid else []
+    )
+
+    result["portrait_description"] = compose_portrait(result)
     return result
 
 

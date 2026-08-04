@@ -34,7 +34,7 @@ The prompt must produce a polished, cinematic, live-action character portrait st
 Return ONLY the prompt text paragraph.
 Begin with: A eye-level medium close-up portrait shot of [character name], [species/object type], [composition/pose].
 Preserve and bind every color, facial feature, skin tone, hair style, wardrobe item, accessory, posture, and action explicitly to its noun.
-Translate any missing or vague features into plausible Cradle-fantasy physical materials and details.
+Where a feature is not described in the supplied summary, keep it visually neutral and plausible for the Cradle setting rather than inventing specific unsupported detail such as an exact color, named material, or distinctive marking.
 Specify coherent key-light direction, subtle rim lighting, a 50mm prime lens at f/2.0 aperture, sharp focus on the eyes, smooth natural background blur, and subtle 35mm film grain.
 Use concrete, positive language only. Omit quality buzzwords, markdown tags, bullet points, explanations, and negative prompting.
 """.strip()
@@ -83,10 +83,17 @@ def get_existing_image_path(record: dict[str, Any]) -> str | None:
 
 
 def construct_optimization_instruction(record: dict[str, Any]) -> str:
+    from bookcast_fields import has_value
+
     name = record.get("canonical_name", "Unknown Character")
     species = record.get("species_or_object_type", "human")
     entity_type = record.get("entity_type", "individual person")
-    portrait_desc = record.get("portrait_description", "")
+    # Prefer the enrichment-interview description (cited facts plus a
+    # clearly labeled inferred section) over the bare cited-only portrait —
+    # see enrich_bookcast_mcp.py. Falls back for the ~20 records that didn't
+    # need enrichment (already had 3+ grounded traits) or couldn't be
+    # interviewed (the two hand-curated Remnant records).
+    portrait_desc = record.get("portrait_description_enriched") or record.get("portrait_description", "")
     face = record.get("face")
     skin = record.get("skin_tone")
     eyes = record.get("eyes")
@@ -101,27 +108,27 @@ def construct_optimization_instruction(record: dict[str, Any]) -> str:
     color_info = record.get("color_information")
 
     attributes = []
-    if face and "not specified" not in str(face).lower():
+    if has_value(face):
         attributes.append(f"Face: {face}")
-    if skin and "not specified" not in str(skin).lower():
+    if has_value(skin):
         attributes.append(f"Skin tone/surface: {skin}")
-    if eyes and "not specified" not in str(eyes).lower():
+    if has_value(eyes):
         attributes.append(f"Eyes: {eyes}")
-    if hair and "not specified" not in str(hair).lower():
+    if has_value(hair):
         attributes.append(f"Hair: {hair}")
-    if build and "not specified" not in str(build).lower():
+    if has_value(build):
         attributes.append(f"Build: {build}")
-    if (clothing or wardrobe) and "not specified" not in str(clothing or wardrobe).lower():
+    if has_value(clothing) or has_value(wardrobe):
         attributes.append(f"Clothing/Wardrobe: {clothing or wardrobe}")
-    if accessories and "not specified" not in str(accessories).lower():
+    if has_value(accessories):
         attributes.append(f"Accessories/Equipment: {accessories}")
-    if posture and "not specified" not in str(posture).lower():
+    if has_value(posture):
         attributes.append(f"Posture: {posture}")
-    if action and "not specified" not in str(action).lower():
+    if has_value(action):
         attributes.append(f"Action: {action}")
-    if fighting_move and "not specified" not in str(fighting_move).lower():
+    if has_value(fighting_move):
         attributes.append(f"Fighting move: {fighting_move}")
-    if color_info and "not specified" not in str(color_info).lower():
+    if has_value(color_info):
         attributes.append(f"Color information: {color_info}")
 
     attr_str = "\n".join(attributes) if attributes else "No extra specific visual attributes cited."

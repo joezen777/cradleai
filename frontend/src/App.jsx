@@ -196,6 +196,30 @@ function BookCastCard({ member, onExpandImage }) {
           )}
         </div>
 
+        {member.firstMentionSentence && (
+          <div className="bookcast-section bookcast-firstmention">
+            <span className="bookcast-section-title">First Mention in the Text</span>
+            <blockquote className="bookcast-quote">{member.firstMentionSentence}</blockquote>
+            {member.firstMentionCitation && (
+              <cite className="bookcast-cite">{member.firstMentionCitation}</cite>
+            )}
+          </div>
+        )}
+
+        {member.descriptivePhrases?.length > 0 && (
+          <div className="bookcast-section">
+            <span className="bookcast-section-title">Descriptive Phrases Nearby</span>
+            <ul className="bookcast-phrase-list">
+              {member.descriptivePhrases.map((p, i) => (
+                <li key={i}>
+                  <span className="bookcast-phrase-text">{p.text}</span>
+                  {p.page != null && <span className="bookcast-phrase-page">p. {p.page}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {member.portraitDescription && (
           <div className="bookcast-section">
             <span className="bookcast-section-title">Portrait Description</span>
@@ -239,9 +263,10 @@ function BookCastView({ bookCast, onExpandImage }) {
   const [search, setSearch] = useState("");
   const [bookFilter, setBookFilter] = useState("all");
   const [imageFilter, setImageFilter] = useState("all");
+  const [sortMode, setSortMode] = useState("chronological");
 
   const filtered = useMemo(() => {
-    return bookCast.filter((member) => {
+    const list = bookCast.filter((member) => {
       if (search) {
         const q = search.toLowerCase();
         const nameMatch = member.canonicalName?.toLowerCase().includes(q);
@@ -256,7 +281,19 @@ function BookCastView({ bookCast, onExpandImage }) {
       if (imageFilter === "pending" && member.primaryImageUrl) return false;
       return true;
     });
-  }, [bookCast, search, bookFilter, imageFilter]);
+
+    return list.sort((a, b) => {
+      if (sortMode === "name") {
+        return a.canonicalName.localeCompare(b.canonicalName);
+      }
+      // Default: Chronological (Book -> Chapter -> Page -> Passage -> Name)
+      if ((a.bookOrder ?? 99) !== (b.bookOrder ?? 99)) return (a.bookOrder ?? 99) - (b.bookOrder ?? 99);
+      if ((a.chapterNum ?? 999) !== (b.chapterNum ?? 999)) return (a.chapterNum ?? 999) - (b.chapterNum ?? 999);
+      if ((a.pageNum ?? 9999) !== (b.pageNum ?? 9999)) return (a.pageNum ?? 9999) - (b.pageNum ?? 9999);
+      if ((a.passageNum ?? 9999) !== (b.passageNum ?? 9999)) return (a.passageNum ?? 9999) - (b.passageNum ?? 9999);
+      return a.canonicalName.localeCompare(b.canonicalName);
+    });
+  }, [bookCast, search, bookFilter, imageFilter, sortMode]);
 
   return (
     <div className="bookcast-workspace">
@@ -298,6 +335,25 @@ function BookCastView({ bookCast, onExpandImage }) {
             onClick={() => setImageFilter(imageFilter === "has_image" ? "all" : "has_image")}
           >
             With Image ({bookCast.filter((c) => c.primaryImageUrl).length})
+          </button>
+
+          <div style={{ width: 1, height: 20, background: '#3c3225', margin: '0 4px' }} />
+
+          <button
+            type="button"
+            className={"bookcast-filter-btn" + (sortMode === "chronological" ? " active" : "")}
+            onClick={() => setSortMode("chronological")}
+            title="Sort by book, chapter & passage chronological appearance"
+          >
+            Sort: Chronological
+          </button>
+          <button
+            type="button"
+            className={"bookcast-filter-btn" + (sortMode === "name" ? " active" : "")}
+            onClick={() => setSortMode("name")}
+            title="Sort alphabetically by character name"
+          >
+            Sort: A–Z
           </button>
         </div>
         <div className="bookcast-count-badge">

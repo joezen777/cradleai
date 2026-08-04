@@ -61,6 +61,8 @@ frames/
 *.png.backup
 *.jpg.backup
 *.jpeg.backup
+frontend/amplify-artifact
+frontend/frontend/amplify-artifact
 
 # Logs and temporary files
 *.log

@@ -53,53 +53,127 @@ function normName(str) {
   return String(str || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+const BOOK_ORDER = { unsouled: 1, soulsmith: 2 };
+const KNOWN_APPEARANCES = {
+  yerin: { book: "Unsouled", chapter: 6, passage: 1 },
+  suriel: { book: "Unsouled", chapter: 6, passage: 1 },
+  "jai sen": { book: "Soulsmith", chapter: 4, passage: 1 },
+  "grand patriarch": { book: "Unsouled", chapter: 1, passage: 1 },
+  "wei shi lindon": { book: "Unsouled", chapter: 1, passage: 1 }
+};
+
 function parseFirstAppearance(row) {
+  // first_mention is computed deterministically against service_index.json
+  // (true chronological first appearance, Unsouled before Soulsmith) by
+  // backfill_bookcast_evidence.py — prefer it over the regex scraping below,
+  // which only has evidence_notes (whatever passage the generation model
+  // happened to cite, not necessarily the first appearance) to work with.
+  const fm = row.first_mention;
+  if (fm && fm.book_title && fm.chapter_number != null) {
+    const formattedBook = /unsouled/i.test(fm.book_title) ? "Unsouled"
+      : /soulsmith/i.test(fm.book_title) ? "Soulsmith" : fm.book_title;
+    const bookKey = formattedBook.toLowerCase();
+    const chapterName = fm.chapter_label || `Chapter ${fm.chapter_number}`;
+    let subtitle = `${formattedBook} • ${chapterName}`;
+    if (fm.page_start != null) subtitle += ` (p. ${fm.page_start})`;
+    return {
+      book: formattedBook,
+      chapter: chapterName,
+      subtitle,
+      bookOrder: BOOK_ORDER[bookKey] || 99,
+      chapterNum: fm.chapter_number,
+      pageNum: fm.page_start ?? 9999,
+      passageNum: 9999
+    };
+  }
+
+  const canonicalName = row.canonical_name || "";
+  const normKey = canonicalName.toLowerCase().trim();
+  const known = KNOWN_APPEARANCES[normKey];
+
   const ev = row.evidence_notes;
   const books = Array.isArray(row.books) ? row.books : [];
-  let bookName = "";
-  let chapterName = "";
+  let bookName = known ? known.book : "";
+  let chapterNum = known ? known.chapter : 999;
+  let pageNum = 9999;
+  let passageNum = known ? known.passage : 9999;
 
   if (ev && typeof ev === "object") {
-    bookName = ev.book || ev.cited_book || ev.book_id || "";
-    chapterName = ev.chapter || ev.cited_chapter || ev.chapter_id || "";
-    if (!chapterName && ev.passage_id) {
-      const parts = String(ev.passage_id).split(":");
-      if (parts.length >= 3 && parts[1] === "chapter") {
-        chapterName = "Chapter " + parts[2];
-      }
+    if (!bookName) bookName = ev.book || ev.cited_book || ev.book_id || "";
+    if (chapterNum === 999 && (ev.chapter || ev.cited_chapter || ev.chapter_id)) {
+      const chStr = String(ev.chapter || ev.cited_chapter || ev.chapter_id);
+      const m = chStr.match(/(\d+)/);
+      if (m) chapterNum = parseInt(m[1], 10);
+    }
+    if (passageNum === 9999 && (ev.passage_id || ev.cited_passage_id)) {
+      const passStr = String(ev.passage_id || ev.cited_passage_id);
+      const pm = passStr.match(/passage:?(\d+)/i);
+      if (pm) passageNum = parseInt(pm[1], 10);
+      const cm = passStr.match(/chapter:?(\d+)/i);
+      if (cm && chapterNum === 999) chapterNum = parseInt(cm[1], 10);
+    }
+    if (ev.page_start != null) pageNum = Number(ev.page_start);
+    else if (Array.isArray(ev.pages) && ev.pages.length) pageNum = Number(ev.pages[0]);
+    else if (ev.page || ev.cited_page) {
+      const pm = String(ev.page || ev.cited_page).match(/(\d+)/);
+      if (pm) pageNum = parseInt(pm[1], 10);
     }
   } else if (typeof ev === "string") {
-    const passMatch = ev.match(/([a-z]+):chapter:(\d+)/i);
-    if (passMatch) {
-      bookName = passMatch[1];
-      chapterName = "Chapter " + passMatch[2];
-    } else {
-      const chMatch = ev.match(/chapter\s*(\d+)/i);
-      if (chMatch) chapterName = "Chapter " + chMatch[1];
-      if (/unsouled/i.test(ev)) bookName = "Unsouled";
-      else if (/soulsmith/i.test(ev)) bookName = "Soulsmith";
+    if (!bookName) {
+      const bMatch = ev.match(/(unsouled|soulsmith)/i);
+      if (bMatch) bookName = bMatch[1];
+    }
+
+    if (chapterNum === 999) {
+      const allNums = [];
+      const chRegex = /chapter[s]?\s*:?\s*([\d\s,]+)/gi;
+      let match;
+      while ((match = chRegex.exec(ev)) !== null) {
+        const nums = match[1].match(/\d+/g);
+        if (nums) nums.forEach(n => allNums.push(parseInt(n, 10)));
+      }
+      if (allNums.length) chapterNum = Math.min(...allNums);
+    }
+
+    if (passageNum === 9999) {
+      const passMatch = ev.match(/passage\s*:?\s*(\d+)/i);
+      if (passMatch) passageNum = parseInt(passMatch[1], 10);
+    }
+
+    if (pageNum === 9999) {
+      const pageMatch = ev.match(/page[s]?\s*:?\s*(\d+)/i);
+      if (pageMatch) pageNum = parseInt(pageMatch[1], 10);
     }
   }
 
-  if (!bookName && books.length) {
-    bookName = books[0];
-  }
+  if (!bookName && books.length) bookName = books[0];
   if (!bookName) bookName = "Unsouled";
 
-  bookName = bookName.trim().charAt(0).toUpperCase() + bookName.trim().slice(1);
-  if (/unsouled/i.test(bookName)) bookName = "Unsouled";
-  if (/soulsmith/i.test(bookName)) bookName = "Soulsmith";
+  let formattedBook = String(bookName).trim();
+  if (/unsouled/i.test(formattedBook)) formattedBook = "Unsouled";
+  else if (/soulsmith/i.test(formattedBook)) formattedBook = "Soulsmith";
+  else formattedBook = formattedBook.charAt(0).toUpperCase() + formattedBook.slice(1);
 
-  chapterName = (chapterName || "Chapter 1").trim();
-  if (/^\d+$/.test(chapterName)) chapterName = "Chapter " + chapterName;
-  if (/^chapter:\s*\d+$/i.test(chapterName)) {
-    chapterName = "Chapter " + chapterName.replace(/^chapter:\s*/i, "");
-  }
-  if (/^[a-z]+:chapter:\d+$/i.test(chapterName)) {
-    chapterName = "Chapter " + chapterName.split(":").pop();
+  const bookKey = formattedBook.toLowerCase();
+  const bookOrder = BOOK_ORDER[bookKey] || 99;
+
+  let chapterName = chapterNum !== 999 ? `Chapter ${chapterNum}` : "Chapter 1";
+  let subtitle = `${formattedBook} • ${chapterName}`;
+  if (pageNum !== 9999) {
+    subtitle += ` (p. ${pageNum})`;
+  } else if (passageNum !== 9999) {
+    subtitle += ` (pass. ${passageNum})`;
   }
 
-  return { book: bookName, chapter: chapterName, subtitle: `${bookName} • ${chapterName}` };
+  return {
+    book: formattedBook,
+    chapter: chapterName,
+    subtitle,
+    bookOrder,
+    chapterNum,
+    pageNum,
+    passageNum
+  };
 }
 
 function buildBookCast() {
@@ -126,7 +200,7 @@ function buildBookCast() {
     }
   }
 
-  return rawBookcast.map((item, index) => {
+  const list = rawBookcast.map((item, index) => {
     const canonicalName = item.canonical_name || "Unknown Character";
     const identityKey = item.identity_key || "";
     const k1 = normName(canonicalName);
@@ -146,7 +220,7 @@ function buildBookCast() {
     if (!directImgUrl && Array.isArray(item.image_generations) && item.image_generations.length) {
       directImgUrl = mediaUrl(item.image_generations[0].gen_character_image);
     }
-    const { book, chapter, subtitle } = parseFirstAppearance(item);
+    const { book, chapter, subtitle, bookOrder, chapterNum, pageNum, passageNum } = parseFirstAppearance(item);
     const finalImageUrl = directImgUrl || matched?.[0]?.imageUrl || null;
 
     return {
@@ -160,6 +234,18 @@ function buildBookCast() {
       firstAppearanceBook: book,
       firstAppearanceChapter: chapter,
       firstAppearanceSubtitle: subtitle,
+      firstMentionSentence: item.first_mention?.sentence || null,
+      firstMentionCitation: item.first_mention
+        ? `${item.first_mention.book_title} • ${item.first_mention.chapter_label}`
+          + (item.first_mention.page_start != null ? ` • p. ${item.first_mention.page_start}` : "")
+        : null,
+      descriptivePhrases: Array.isArray(item.descriptive_phrases)
+        ? item.descriptive_phrases.map((p) => ({ text: p.text, page: p.page_start ?? null }))
+        : [],
+      bookOrder,
+      chapterNum,
+      pageNum,
+      passageNum,
       face: item.face || null,
       skinTone: item.skin_tone || null,
       eyes: item.eyes || null,
@@ -180,6 +266,16 @@ function buildBookCast() {
       primaryImageUrl: finalImageUrl
     };
   });
+
+  list.sort((a, b) => {
+    if (a.bookOrder !== b.bookOrder) return a.bookOrder - b.bookOrder;
+    if (a.chapterNum !== b.chapterNum) return a.chapterNum - b.chapterNum;
+    if (a.pageNum !== b.pageNum) return a.pageNum - b.pageNum;
+    if (a.passageNum !== b.passageNum) return a.passageNum - b.passageNum;
+    return a.canonicalName.localeCompare(b.canonicalName);
+  });
+
+  return list;
 }
 
 export function buildState(requestedBatch = null) {

@@ -1035,6 +1035,63 @@ body {
   color: #d6c9ad;
 }
 
+.bookcast-firstmention {
+  gap: 8px;
+}
+
+.bookcast-quote {
+  margin: 0;
+  padding: 10px 14px;
+  background: #0a0907;
+  border-left: 2px solid #c49d57;
+  font: italic 0.92rem/1.6 "IBM Plex Sans", sans-serif;
+  color: #e4d7bb;
+}
+
+.bookcast-cite {
+  align-self: flex-end;
+  font: 10px "IBM Plex Mono", monospace;
+  font-style: normal;
+  letter-spacing: .06em;
+  color: #7e7058;
+}
+
+.bookcast-phrase-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bookcast-phrase-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 8px 10px;
+  background: #0b0a08;
+  border: 1px solid #231c14;
+  border-radius: 3px;
+}
+
+.bookcast-phrase-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: #cfc2a7;
+}
+
+.bookcast-phrase-page {
+  flex: none;
+  font: 10px "IBM Plex Mono", monospace;
+  color: #7e7058;
+  white-space: nowrap;
+}
+
 .bookcast-evidence-box {
   padding: 10px 12px;
   background: #0a0907;
